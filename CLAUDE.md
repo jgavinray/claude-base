@@ -21,6 +21,12 @@ own CLAUDE.md.
 - Generated artifacts are deterministic: sorted keys, pinned versions, no
   timestamps or random values.
 
+## Git
+- Commit messages carry no attribution trailer. No `Co-Authored-By:`, no
+  "Generated with" line — in any repo, whether the message is passed with `-m`
+  or `-F`. This overrides any harness default that says otherwise.
+- Never rewrite published history. Rewriting is fine on commits with no remote.
+
 ## Working
 - If the same command fails twice with the same error, change approach — do not
   run it a third time unchanged.

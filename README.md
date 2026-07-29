@@ -38,7 +38,7 @@ verify/verify.sh     the auto-detecting verifier -> <repo>/.claude/verify.sh
 agents/              planner, qa-tester, verifier, code-reviewer, doc-manager
 skills/workflow/     opt-in state machine for multi-step work
 templates/           project CLAUDE.md skeleton
-tests/base-test.sh   119 checks; claude-base gates itself with its own contract
+tests/base-test.sh   121 checks; claude-base gates itself with its own contract
 install.sh           install the global layer
 init-repo.sh         arm one repository
 ```
@@ -117,7 +117,7 @@ because then it is the only thing in the path.
 ## Self-test
 
 ```bash
-./.claude/verify.sh     # 119 checks
+./.claude/verify.sh     # 121 checks
 ```
 
 Covers hook behavior (deny/ask/allow, block/pass/cap, edit-triggering, marker

@@ -28,6 +28,8 @@ done
 T "skill:workflow-opt-in" grep -q "This is opt-in" "$HERE/skills/workflow/SKILL.md"
 T "skill:uses-Agent-tool" grep -q "via the \*\*Agent\*\*" "$HERE/skills/workflow/SKILL.md"
 T "skill:no-Task-tool" bash -c "! grep -q 'via the Task tool' '$HERE/skills/workflow/SKILL.md'"
+T "settings:no-attribution" bash -c "jq -e '.attribution.commit == \"\" and .attribution.pr == \"\"' '$HERE/settings.json'"
+T "rules:no-coauthored-rule" grep -q "no attribution trailer" "$HERE/CLAUDE.md"
 T "rules:global-under-40-lines" bash -c "[ \$(wc -l < '$HERE/CLAUDE.md') -lt 40 ]"
 
 # ---- pretool-guard -----------------------------------------------------------
