@@ -88,7 +88,9 @@ Two escape hatches:
 - `.claude/checks.sh` — your repo-specific checks, run **in addition** to detection.
 - `.claude/verify.local.sh` — **replaces** detection entirely.
 
-Checks stop at the first failure, so the model fixes one thing at a time.
+Checks stop at the first *new* failure, so the model fixes one thing at a time.
+Use `--list` to see what would run, and `--audit` to run everything and report
+every failure without blocking.
 
 A check is only registered when its tool is actually installed. If nothing is
 installed, the repo reports INERT rather than running a check that silently
@@ -138,8 +140,15 @@ question — unusable in a repo whose verifier renders 200 manifests.
 (`kubectl delete <resource>`, `terraform apply`, `git reset --hard`, publishes).
 The original blocked `rm -rf /` and nothing that touches a cluster.
 
-It is a denylist over command text, so it is a **floor, not a fence** —
-obfuscation, shell variables, and scripts-calling-scripts defeat it by
+Recursive delete is the exception: it uses an **allowlist**, because a denylist
+cannot work there. `rm -rf /` is the case that never happens; `rm -rf ./src` and
+`rm -rf ~/dev/<project>` are the ones that do, and no pattern distinguishes the
+latter from legitimate cleanup. So known-ephemeral paths (build output, caches,
+vendored deps) pass silently, unrecoverable targets are denied, and everything
+else asks.
+
+Everything else is a denylist over command text, so it is a **floor, not a
+fence** — obfuscation, shell variables, and scripts-calling-scripts defeat it by
 construction. It protects against accidents, never against a determined process.
 It matters more than usual when `skipDangerousModePermissionPrompt` is set,
 because then it is the only thing in the path.
