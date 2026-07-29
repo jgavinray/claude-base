@@ -22,6 +22,11 @@ CMD=$(jq -r '.tool_input.command // empty')
 # `rm -rf "/"` match the same pattern as `rm -rf /`.
 N=$(printf '%s' "$CMD" | tr '\n' ' ' | tr -s '[:space:]' ' ' | tr -d "'\"")
 
+# Disable globbing before any word-splitting loop below. Without this, iterating
+# an unquoted `rm -rf *` expands the `*` against the hook's own cwd and the
+# literal argument we need to catch disappears.
+set -f
+
 decide() { # decision, reason
   jq -n --arg d "$1" --arg r "$2" '{
     hookSpecificOutput: {
@@ -35,10 +40,65 @@ decide() { # decision, reason
 
 m() { printf '%s' "$N" | grep -qiE "$1"; }
 
+# ------------------------------------------------------- recursive delete (rm)
+# Handled by ALLOWLIST, not denylist. A denylist cannot work here: `rm -rf /` is
+# the case that never actually happens, while `rm -rf ./src` — indistinguishable
+# from legitimate cleanup by pattern alone — is the one that eats a project.
+#
+# So: enumerate the paths that are safe to blow away (build output, caches,
+# vendored deps), allow those silently, and ASK about every other recursive
+# delete. Unrecoverable targets stay a hard DENY.
+EPHEMERAL='^(\./)?(node_modules|build|dist|out|target|coverage|htmlcov|\.next|\.nuxt|\.svelte-kit|__pycache__|\.pytest_cache|\.mypy_cache|\.ruff_cache|\.tox|\.venv|venv|env|\.cache|tmp|temp|[^/]*\.egg-info)(/.*)?/?$'
+
+# Scan tokens once: find `rm`, note whether a recursive flag is set, collect
+# targets. Checking flags as tokens (not by grepping the whole line for "r")
+# avoids classifying `rm -f server.log` as recursive.
+RECURSIVE=0
+TARGETS=""
+SEEN=0
+for w in $N; do
+  if [ "$w" = "rm" ] || [ "$w" = "/bin/rm" ]; then SEEN=1; RECURSIVE=0; TARGETS=""; continue; fi
+  [ "$SEEN" -eq 1 ] || continue
+  case "$w" in
+    '&&'|'||'|';'|'|') SEEN=0; continue ;;   # end of this command
+    # `-*[rR]*` and not `-[a-zA-Z]*[rR]*`: in `-rf` the r IS the first flag
+    # character, so requiring a letter before it matches nothing.
+    -*[rR]*)           RECURSIVE=1 ;;
+    -*)                ;;                    # some other flag
+    *)                 TARGETS="$TARGETS $w" ;;
+  esac
+done
+
+if [ "$RECURSIVE" -eq 1 ]; then
+  for w in $TARGETS; do
+
+    # Unrecoverable: filesystem root, home itself, or the whole current tree.
+    case "$w" in
+      /|'~'|'~/'|'$HOME'|'$HOME/'|.|./|..|../|'*'|'./*')
+        decide deny "pretool-guard: 'rm -r $w' would remove everything under it and has no targeted alternative. Blocked — name the specific path you mean." ;;
+    esac
+
+    # Known-ephemeral build/cache output: allow without interrupting.
+    printf '%s' "$w" | grep -qE "$EPHEMERAL" && continue
+
+    # Absolute path outside /tmp: never a build artifact.
+    case "$w" in
+      /tmp/*|/private/tmp/*|/var/folders/*) continue ;;
+      /*) decide deny "pretool-guard: 'rm -r $w' targets an absolute path outside /tmp. Blocked — this is how a project directory disappears." ;;
+      '~'/*|'$HOME'/*) decide deny "pretool-guard: 'rm -r $w' targets a path under your home directory. Blocked — use a path relative to the project." ;;
+    esac
+
+    # Anything else recursive: recoverable only if it is committed. Ask.
+    decide ask "pretool-guard: recursive delete of '$w', which is not a recognized build/cache directory. Uncommitted or untracked files there are unrecoverable. Confirm?"
+  done
+fi
+
+# find -delete / -exec rm: same blast radius, different spelling.
+m 'find +.*-delete'          && decide ask "pretool-guard: 'find -delete' removes every match. Confirm?"
+m 'find +.*-exec +rm'        && decide ask "pretool-guard: 'find -exec rm' removes every match. Confirm?"
+
 # ------------------------------------------------------------------ DENY tier
 # Filesystem / host
-m 'rm +(-[a-z]+ +)*-?[a-z]*r[a-z]* +(-[a-z]+ +)*/ *($|;|&)' && decide deny "pretool-guard: recursive delete of / — blocked."
-m 'rm +(-[a-z]+ +)*(~|\$HOME|/Users/[a-zA-Z._-]+) *($|;|&)'  && decide deny "pretool-guard: recursive delete of home — blocked."
 m 'mkfs\.'                                    && decide deny "pretool-guard: filesystem format — blocked."
 m 'dd +.*of=/dev/'                            && decide deny "pretool-guard: raw write to block device — blocked."
 m '> */dev/(sd|nvme|disk|hd)'                 && decide deny "pretool-guard: redirect over block device — blocked."
