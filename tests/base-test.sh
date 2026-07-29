@@ -29,6 +29,9 @@ T "skill:workflow-opt-in" grep -q "This is opt-in" "$HERE/skills/workflow/SKILL.
 T "skill:uses-Agent-tool" grep -q "via the \*\*Agent\*\*" "$HERE/skills/workflow/SKILL.md"
 T "skill:no-Task-tool" bash -c "! grep -q 'via the Task tool' '$HERE/skills/workflow/SKILL.md'"
 T "settings:no-attribution" bash -c "jq -e '.attribution.commit == \"\" and .attribution.pr == \"\"' '$HERE/settings.json'"
+T "license:gplv2-present" bash -c "grep -q 'GNU GENERAL PUBLIC LICENSE' '$HERE/LICENSE' && grep -q 'Version 2, June 1991' '$HERE/LICENSE'"
+T "license:readme-states-gplv2" grep -q "GNU General Public License" "$HERE/README.md"
+T "readme:documents-baseline" grep -q "baseline" "$HERE/README.md"
 T "rules:no-coauthored-rule" grep -q "no attribution trailer" "$HERE/CLAUDE.md"
 T "rules:global-under-40-lines" bash -c "[ \$(wc -l < '$HERE/CLAUDE.md') -lt 40 ]"
 
