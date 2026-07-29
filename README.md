@@ -38,8 +38,9 @@ verify/verify.sh     the auto-detecting verifier -> <repo>/.claude/verify.sh
 agents/              planner, qa-tester, verifier, code-reviewer, doc-manager
 skills/workflow/     opt-in state machine for multi-step work
 templates/           project CLAUDE.md skeleton
-tests/base-test.sh   124 checks; claude-base gates itself with its own contract
+tests/base-test.sh   136 checks; claude-base gates itself with its own contract
 install.sh           install the global layer
+uninstall.sh         remove exactly what install.sh added
 init-repo.sh         arm one repository (baselines what already fails)
 LICENSE              GNU GPL v2
 ```
@@ -71,6 +72,32 @@ scanners can't see hooks in `$HOME`. If a specific repo needs to carry its own
 harness, copy `hooks/` into it and switch the paths back to `$CLAUDE_PROJECT_DIR`.
 
 Requires `jq`. Verify wiring with `/hooks` inside Claude Code.
+`./uninstall.sh` removes exactly what was added and leaves everything else in
+`settings.json` alone.
+
+**Cloning a repo requires no setup.** Global hooks apply everywhere
+automatically, and a repo with no `.claude/verify.sh` simply has no gate — the
+Stop hook exits silently, the guard and per-edit syntax checks stay active, and
+SessionStart reports `GATE ABSENT` so a green result is never implied. There is
+no preflight. `init-repo.sh` is how you opt a repo *in*, when you want one.
+
+## Reproducibility
+
+Detection is environment-dependent by design — a check registers only if its
+tool is installed. That means the same repo can gate differently on two machines
+while both report green. Three things address it:
+
+- **`init-repo.sh --pin`** writes `.claude/expected-checks`. After that, a
+  missing tool is a hard **failure** rather than a silent smaller gate:
+  "ruff is not installed" should look like a broken setup, not a passing build.
+- **`templates/ci.yml`** runs the same `.claude/verify.sh` in GitHub Actions, so
+  local and CI can't drift into two different definitions of done.
+- **Per-check timeouts** (`CLAUDE_BASE_CHECK_TIMEOUT`, default 300s) make a hung
+  check fail and name itself, and `LC_ALL=C` pins collation.
+
+File lists come from `git ls-files | sort` — never `grep -r` recursion order,
+and never truncated. An earlier version capped the kubeconform list at 500
+files, which silently validated an arbitrary subset of a larger repo.
 
 ## The verifier
 
@@ -166,7 +193,7 @@ because then it is the only thing in the path.
 ## Self-test
 
 ```bash
-./.claude/verify.sh     # 124 checks
+./.claude/verify.sh     # 136 checks
 ```
 
 Covers hook behavior (deny/ask/allow, block/pass/cap, edit-triggering, marker

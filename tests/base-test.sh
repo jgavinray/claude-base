@@ -290,6 +290,41 @@ XR=$(mkrepo)
 T "discovery:excludes-dot-claude" bash -c "cd '$XR' && ./.claude/verify.sh --list | grep -qx NONE"
 rm -rf "$XR"
 
+
+# ---- determinism: pinning, timeouts, no silent truncation -------------------
+PR2=$(mkrepo)
+printf '#!/usr/bin/env bash\necho ok\n' > "$PR2/a.sh"
+printf 'need-a-tool-that-is-not-here\n' > "$PR2/.claude/expected-checks"
+TN "pin:missing-expected-check-fails" bash -c "cd '$PR2' && ./.claude/verify.sh"
+T  "pin:names-the-missing-check" bash -c "cd '$PR2' && ./.claude/verify.sh 2>&1 | grep -q 'EXPECTED CHECK'"
+(cd "$PR2" && ./.claude/verify.sh --list | sort) > "$PR2/.claude/expected-checks"
+T  "pin:satisfied-passes" bash -c "cd '$PR2' && ./.claude/verify.sh"
+rm -rf "$PR2"
+
+TO=$(mkrepo)
+printf '#!/usr/bin/env bash\nsleep 30\n' > "$TO/.claude/checks.sh"; chmod +x "$TO/.claude/checks.sh"
+if [ -n "$(command -v timeout || command -v gtimeout || true)" ]; then
+  TN "timeout:hung-check-fails" bash -c "cd '$TO' && CLAUDE_BASE_CHECK_TIMEOUT=1 ./.claude/verify.sh"
+  T  "timeout:names-the-check" bash -c "cd '$TO' && CLAUDE_BASE_CHECK_TIMEOUT=1 ./.claude/verify.sh 2>&1 | grep -q 'TIMED OUT'"
+else
+  echo "SKIP timeout:* (no timeout/gtimeout)"
+fi
+rm -rf "$TO"
+
+T "verify:no-silent-truncation" bash -c "! grep -v '^[[:space:]]*#' '$HERE/verify/verify.sh' | grep -q 'head -500'"
+T "verify:kubeconform-sorted" bash -c "grep -q 'sort' '$HERE/verify/verify.sh'"
+T "verify:locale-pinned" grep -q 'export LC_ALL=C' "$HERE/verify/verify.sh"
+
+# ---- uninstall is exact and reversible --------------------------------------
+T "uninstall:executable" test -x "$HERE/uninstall.sh"
+T "uninstall:dry-run-writes-nothing" bash -c "
+  B=\$(ls -la \"\$HOME/.claude\" 2>/dev/null | shasum)
+  '$HERE/uninstall.sh' --dry-run >/dev/null 2>&1
+  A=\$(ls -la \"\$HOME/.claude\" 2>/dev/null | shasum)
+  [ \"\$B\" = \"\$A\" ]"
+T "uninstall:keeps-attribution" grep -q "attribution.*left in settings.json\|NOT removed" "$HERE/uninstall.sh"
+T "ci:template-runs-same-verifier" grep -q './.claude/verify.sh' "$HERE/templates/ci.yml"
+
 echo "----"
 if [ "$FAILURES" -eq 0 ]; then echo "base-test: all green"; else echo "base-test: $FAILURES failure(s)"; fi
 exit $((FAILURES > 0))

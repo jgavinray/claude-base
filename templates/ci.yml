@@ -1,0 +1,37 @@
+# Drop into .github/workflows/verify.yml
+#
+# Runs the SAME .claude/verify.sh the Stop gate runs locally, so "done" means one
+# thing in both places. The usual failure without this is a local gate and a CI
+# pipeline that drift until nobody trusts either.
+#
+# Install the tools your repo's checks actually need — `verify.sh --list` prints
+# them. If you pinned the set with `init-repo.sh --pin`, a missing tool fails
+# here loudly instead of quietly gating on less.
+name: verify
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      # jq is required by the harness; everything else depends on your checks.
+      - name: install tooling
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq jq
+          # Uncomment what `.claude/verify.sh --list` reports for this repo:
+          # sudo snap install yq
+          # pipx install ruff
+          # curl -sSLo /tmp/kc.tar.gz https://github.com/yannh/kubeconform/releases/latest/download/kubeconform-linux-amd64.tar.gz \
+          #   && sudo tar -xzf /tmp/kc.tar.gz -C /usr/local/bin kubeconform
+
+      - name: what will run
+        run: ./.claude/verify.sh --list
+
+      - name: verify
+        run: ./.claude/verify.sh

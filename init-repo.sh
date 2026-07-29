@@ -7,6 +7,9 @@
 #   ./init-repo.sh [path] --link         symlink it instead (updates propagate)
 #   ./init-repo.sh [path] --local        keep .claude/ out of git (.git/info/exclude)
 #   ./init-repo.sh [path] --no-baseline  arm strictly; pre-existing failures block
+#   ./init-repo.sh [path] --pin          record the required check set; a later
+#                                        run with a tool missing then FAILS
+#                                        rather than silently gating on less
 #
 # Baselining is what makes this safe on a fork you are upstreaming to, or on any
 # older repo carrying lint debt: upstream's existing failures are recorded and
@@ -22,12 +25,14 @@ TARGET="."
 MODE="copy"
 LOCAL=0
 BASELINE=1
+PIN=0
 
 for arg in "$@"; do
   case "$arg" in
     --link)        MODE=link ;;
     --local)       LOCAL=1 ;;
     --no-baseline) BASELINE=0 ;;
+    --pin)         PIN=1 ;;
     -*)            echo "init-repo: unknown flag $arg" >&2; exit 64 ;;
     *)             TARGET="$arg" ;;
   esac
@@ -93,6 +98,15 @@ GATE INERT in $TARGET
   Then: chmod +x .claude/checks.sh && $0 $TARGET
 EOF
   exit 0
+fi
+
+if [ "$PIN" -eq 1 ]; then
+  {
+    echo "# Checks this repo REQUIRES. A missing one is a failure, not a skip —"
+    echo "# detection is environment-dependent and a smaller gate still reports green."
+    (cd "$TARGET" && ./.claude/verify.sh --list) | sort
+  } > "$TARGET/.claude/expected-checks"
+  echo "  pinned  .claude/expected-checks ($(printf '%s' "$CHECKS" | wc -w | tr -d ' ') checks)"
 fi
 
 echo "Detected checks: $CHECKS"

@@ -17,6 +17,14 @@
 set -uo pipefail
 cd "$(dirname "$0")/.." || exit 1
 
+# Deterministic collation and message text: sort order, character classes, and
+# tool output all vary by locale otherwise, which makes "same repo, same commit"
+# produce different results on different machines.
+export LC_ALL=C
+
+TIMEOUT_CMD="$(command -v timeout || command -v gtimeout || true)"
+CHECK_TIMEOUT="${CLAUDE_BASE_CHECK_TIMEOUT:-300}"
+
 LIST=0
 AUDIT=0
 case "${1:-}" in
@@ -105,9 +113,19 @@ fi
 if have kubeconform; then
   # Only manifests that look like k8s objects; -ignore-missing-schemas keeps CRDs
   # from turning every run red.
-  add "kubeconform" "kubeconform -strict -summary -ignore-missing-schemas \
-    \$(grep -rl --include='*.yaml' --include='*.yml' -e '^kind:' -e '^apiVersion:' . \
-       --exclude-dir=.git --exclude-dir=templates --exclude-dir=node_modules 2>/dev/null | head -500) >/dev/null"
+  #
+  # File list comes from `git ls-files | sort`, NOT `grep -r`. Recursion order is
+  # filesystem-dependent, and the previous `| head -500` silently validated an
+  # arbitrary 500 of a larger set — nondeterministic AND a false green. Every
+  # matching file is checked now; xargs keeps the argument list bounded.
+  add "kubeconform" 'FILES=$(git ls-files -c -o --exclude-standard -- ":(exclude).claude/*" "*.yaml" "*.yml" \
+      | sort \
+      | while read -r f; do
+          case "$f" in templates/*|*/templates/*) continue;; esac
+          grep -lE "^(kind|apiVersion):" "$f" 2>/dev/null
+        done)
+    [ -z "$FILES" ] && exit 0
+    printf "%s\n" "$FILES" | xargs kubeconform -strict -summary -ignore-missing-schemas >/dev/null'
 fi
 
 # --- Jsonnet
@@ -214,6 +232,36 @@ BASELINE=""
 [ -f .claude/baseline ] && BASELINE=$(grep -v '^#' .claude/baseline 2>/dev/null | grep -v '^[[:space:]]*$')
 in_baseline() { printf '%s\n' "$BASELINE" | grep -qx -- "$1"; }
 
+# -------------------------------------------------------------- expected checks
+# `.claude/expected-checks` pins the check set this repo REQUIRES. Detection is
+# environment-dependent — a check registers only if its tool is installed — so
+# without a pin the same repo gates differently on your laptop, a teammate's,
+# and CI, and the weaker gate still reports green.
+#
+# A missing expected check is a hard failure. That is the point: "ruff is not
+# installed" should look like a broken setup, not like a passing build.
+if [ -f .claude/expected-checks ] && [ "$AUDIT" -eq 0 ]; then
+  DETECTED=$(for c in "${CHECKS[@]}"; do printf '%s\n' "${c%%	*}"; done | sort)
+  MISSING=""
+  while read -r want; do
+    case "$want" in ''|\#*) continue ;; esac
+    printf '%s\n' "$DETECTED" | grep -qx -- "$want" || MISSING="$MISSING $want"
+  done < .claude/expected-checks
+  if [ -n "$MISSING" ]; then
+    cat >&2 <<EOF
+verify.sh: EXPECTED CHECK(S) NOT AVAILABLE:$MISSING
+
+.claude/expected-checks requires them, but detection did not register them —
+the tool is probably not installed here. This is a failure, not a skip: running
+a smaller gate and reporting green is how "works on my machine" gets committed.
+
+Install the missing tool, or drop the line from .claude/expected-checks if the
+check is genuinely no longer required.
+EOF
+    exit 1
+  fi
+fi
+
 # --------------------------------------------------------------------- run them
 FAILED=0
 PREEXISTING=""
@@ -222,7 +270,15 @@ for entry in "${CHECKS[@]}"; do
   name="${entry%%	*}"
   cmd="${entry#*	}"
   [ "$AUDIT" -eq 0 ] && printf '== %s\n' "$name"
-  if OUT=$(LC_ALL=C bash -c "$cmd" 2>&1); then
+  # Per-check timeout: a hung check must fail loudly and name itself, not stall
+  # until the Stop hook's outer limit fires with no indication of the culprit.
+  # Capture the status on the same line — reading $? after `fi` is fragile.
+  OUT=$(LC_ALL=C ${TIMEOUT_CMD:+"$TIMEOUT_CMD" "$CHECK_TIMEOUT"} bash -c "$cmd" 2>&1); RC=$?
+  if [ "$RC" -eq 124 ]; then
+    OUT="TIMED OUT after ${CHECK_TIMEOUT}s (set CLAUDE_BASE_CHECK_TIMEOUT to change)
+$OUT"
+  fi
+  if [ "$RC" -eq 0 ]; then
     [ "$AUDIT" -eq 1 ] && printf 'PASS %s\n' "$name"
     in_baseline "$name" && FIXED="$FIXED $name"
     continue
