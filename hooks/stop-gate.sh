@@ -18,6 +18,20 @@ INPUT=$(cat)
 SESSION_ID=$(printf '%s' "$INPUT" | jq -r '.session_id // "unknown"')
 CWD=$(printf '%s' "$INPUT" | jq -r '.cwd // "."')
 
+# Project-level harness wins. Hooks from ~/.claude and <repo>/.claude MERGE —
+# both sets run — so a repo carrying its own Stop hook would otherwise run its
+# verifier and ours on every stop. Defer to the project's, which is the one its
+# author tuned.
+project_owns() { # hook event name
+  local f
+  for f in "$CWD/.claude/settings.json" "$CWD/.claude/settings.local.json"; do
+    [ -f "$f" ] || continue
+    jq -e --arg e "$1" '.hooks[$e] // empty | length > 0' "$f" >/dev/null 2>&1 && return 0
+  done
+  return 1
+}
+project_owns Stop && exit 0
+
 STATE_DIR="${TMPDIR:-/tmp}"
 EDIT_MARKER="$STATE_DIR/claude-base-edited-${SESSION_ID}"
 COUNT_FILE="$STATE_DIR/claude-base-stopgate-${SESSION_ID}"

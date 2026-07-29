@@ -18,7 +18,11 @@ set -uo pipefail
 cd "$(dirname "$0")/.." || exit 1
 
 LIST=0
-[ "${1:-}" = "--list" ] && LIST=1
+AUDIT=0
+case "${1:-}" in
+  --list)  LIST=1 ;;
+  --audit) AUDIT=1 ;;   # run every check, report which fail, always exit 0
+esac
 
 have() { command -v "$1" >/dev/null 2>&1; }
 
@@ -108,7 +112,7 @@ fi
 
 # --- Jsonnet
 if compgen -G "*.jsonnet" >/dev/null 2>&1 || compgen -G "*.libsonnet" >/dev/null 2>&1; then
-  have jsonnetfmt && add "jsonnetfmt" "jsonnetfmt --test \$(git ls-files '*.jsonnet' '*.libsonnet')"
+  have jsonnetfmt && add "jsonnetfmt" "jsonnetfmt --test \$(git ls-files -c -o --exclude-standard ':(exclude).claude/*' '*.jsonnet' '*.libsonnet')"
 fi
 
 # --- Ansible
@@ -124,10 +128,10 @@ fi
 # reports INERT rather than running a check that silently no-ops. A gate that
 # skips is indistinguishable from a gate that passes, and that is the failure
 # mode this whole design exists to prevent.
-if [ -n "$(git ls-files '*.yaml' '*.yml' 2>/dev/null | head -1)" ]; then
+if [ -n "$(git ls-files -c -o --exclude-standard ':(exclude).claude/*' '*.yaml' '*.yml' 2>/dev/null | head -1)" ]; then
   if have yq; then
     add "yaml-parse" 'BAD=0
-      for f in $(git ls-files "*.yaml" "*.yml"); do
+      for f in $(git ls-files -c -o --exclude-standard ":(exclude).claude/*" "*.yaml" "*.yml"); do
         case "$f" in templates/*|*/templates/*) continue;; esac
         grep -q "{{" "$f" 2>/dev/null && continue
         yq e "true" "$f" >/dev/null 2>&1 || { echo "$f: YAML parse error" >&2; BAD=1; }
@@ -139,14 +143,14 @@ if [ -n "$(git ls-files '*.yaml' '*.yml' 2>/dev/null | head -1)" ]; then
 fi
 
 # --- Shell
-if [ -n "$(git ls-files '*.sh' 2>/dev/null | head -1)" ]; then
-  add "sh-syntax" "for f in \$(git ls-files '*.sh'); do bash -n \"\$f\" || exit 1; done"
-  have shellcheck && add "shellcheck" "shellcheck -S warning \$(git ls-files '*.sh')"
+if [ -n "$(git ls-files -c -o --exclude-standard ':(exclude).claude/*' '*.sh' 2>/dev/null | head -1)" ]; then
+  add "sh-syntax" "for f in \$(git ls-files -c -o --exclude-standard ':(exclude).claude/*' '*.sh'); do bash -n \"\$f\" || exit 1; done"
+  have shellcheck && add "shellcheck" "shellcheck -S warning \$(git ls-files -c -o --exclude-standard ':(exclude).claude/*' '*.sh')"
 fi
 
 # --- JSON validity
-if have jq && [ -n "$(git ls-files '*.json' 2>/dev/null | head -1)" ]; then
-  add "json-parse" "for f in \$(git ls-files '*.json'); do jq empty \"\$f\" || exit 1; done"
+if have jq && [ -n "$(git ls-files -c -o --exclude-standard ':(exclude).claude/*' '*.json' 2>/dev/null | head -1)" ]; then
+  add "json-parse" "for f in \$(git ls-files -c -o --exclude-standard ':(exclude).claude/*' '*.json'); do jq empty \"\$f\" || exit 1; done"
 fi
 
 # --- repo-specific additions
@@ -177,7 +181,7 @@ trap 'rm -f "$YAMLCHECK"' EXIT
 cat > "$YAMLCHECK" <<'PYEOF'
 import subprocess, sys
 import yaml  # registered only when importable — see the detection block
-files = subprocess.run(["git", "ls-files", "*.yaml", "*.yml"],
+files = subprocess.run(["git","ls-files","-c","-o","--exclude-standard",":(exclude).claude/*","*.yaml","*.yml"],
                        capture_output=True, text=True).stdout.split()
 bad = []
 for f in files:
@@ -198,19 +202,57 @@ sys.exit(1 if bad else 0)
 PYEOF
 export CLAUDE_BASE_YAMLCHECK="$YAMLCHECK"
 
+# --------------------------------------------------------------------- baseline
+# `.claude/baseline` lists checks that were ALREADY failing when this repo was
+# armed — pre-existing lint debt, or upstream failures in a fork you contribute
+# to. Those are reported but do not block; anything NOT in the baseline does.
+#
+# The gate is therefore "no regression from a recorded starting point", not
+# "absolute green". Absolute green is the special case where the baseline is
+# empty, which is most repos and the state every repo should be moving toward.
+BASELINE=""
+[ -f .claude/baseline ] && BASELINE=$(grep -v '^#' .claude/baseline 2>/dev/null | grep -v '^[[:space:]]*$')
+in_baseline() { printf '%s\n' "$BASELINE" | grep -qx -- "$1"; }
+
 # --------------------------------------------------------------------- run them
 FAILED=0
+PREEXISTING=""
+FIXED=""
 for entry in "${CHECKS[@]}"; do
   name="${entry%%	*}"
   cmd="${entry#*	}"
-  printf '== %s\n' "$name"
-  if ! OUT=$(bash -c "$cmd" 2>&1); then
-    printf '%s\n' "$OUT" | tail -40
-    printf 'FAIL: %s\n' "$name" >&2
-    FAILED=1
-    break   # first failure only: the agent should fix one thing at a time
+  [ "$AUDIT" -eq 0 ] && printf '== %s\n' "$name"
+  if OUT=$(LC_ALL=C bash -c "$cmd" 2>&1); then
+    [ "$AUDIT" -eq 1 ] && printf 'PASS %s\n' "$name"
+    in_baseline "$name" && FIXED="$FIXED $name"
+    continue
   fi
+
+  # Audit: report every failure, never block, never stop early.
+  if [ "$AUDIT" -eq 1 ]; then
+    printf 'FAIL %s\n' "$name"
+    continue
+  fi
+
+  if in_baseline "$name"; then
+    PREEXISTING="$PREEXISTING $name"
+    echo "   (pre-existing failure, in .claude/baseline — not blocking)"
+    continue
+  fi
+
+  printf '%s\n' "$OUT" | tail -40
+  printf 'FAIL: %s\n' "$name" >&2
+  FAILED=1
+  break   # first NEW failure only: fix one thing at a time
 done
 
-[ "$FAILED" -eq 0 ] && echo "verify.sh: all ${#CHECKS[@]} check(s) green"
+[ "$AUDIT" -eq 1 ] && exit 0
+
+if [ "$FAILED" -eq 0 ]; then
+  echo "verify.sh: no regressions across ${#CHECKS[@]} check(s)"
+  [ -n "$PREEXISTING" ] && echo "  still failing from baseline:$PREEXISTING"
+  # A baselined check that now passes should leave the baseline, or it will hide
+  # a real regression later.
+  [ -n "$FIXED" ] && echo "  NOW PASSING — remove from .claude/baseline:$FIXED"
+fi
 exit "$FAILED"

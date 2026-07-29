@@ -240,6 +240,51 @@ T "install:dry-run-no-writes" bash -c "
 rm -rf "$W" "$GW" "$R" "$R2" "${R3:-}" "$R4" "$R5" "$R6" "$R7" "$R8" 2>/dev/null
 rm -f "$TMP/claude-base-edited-basetest-"* "$TMP/claude-base-stopgate-basetest-"* 2>/dev/null
 
+
+# ---- project-level harness takes precedence ---------------------------------
+# Hooks from ~/.claude and <repo>/.claude both run. A repo that carries its own
+# harness must not get two gates.
+PW=$(mktemp -d); mkdir -p "$PW/.claude"
+printf '#!/usr/bin/env bash\necho OWNFAIL\nexit 1\n' > "$PW/.claude/verify.sh"; chmod +x "$PW/.claude/verify.sh"
+SIDP="basetest-proj-$$"; : > "$TMP/claude-base-edited-$SIDP"
+printf '{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"x"}]}]}}' > "$PW/.claude/settings.json"
+OUT=$(printf '{"session_id":"%s","cwd":"%s"}' "$SIDP" "$PW" | "$S")
+if [ -z "$OUT" ]; then ok "defer:stopgate-yields-to-project"; else bad "defer:stopgate-yields-to-project" "emitted: $OUT"; fi
+printf '{"hooks":{"PreToolUse":[]}}' > "$PW/.claude/settings.json"
+OUT=$(printf '{"session_id":"%s","cwd":"%s"}' "$SIDP" "$PW" | "$S")
+T "defer:stopgate-runs-without-project-stop" bash -c "printf '%s' '$OUT' | jq -e '.decision == \"block\"'"
+printf '{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"x"}]}]}}' > "$PW/.claude/settings.json"
+SCOUT=$(printf '{"cwd":"%s"}' "$PW" | "$SC" 2>/dev/null)
+if [ -z "$SCOUT" ]; then ok "defer:sessctx-yields-to-project"; else bad "defer:sessctx-yields-to-project"; fi
+rm -rf "$PW"; rm -f "$TMP/claude-base-edited-$SIDP" "$TMP/claude-base-stopgate-$SIDP"
+
+# ---- baseline: gate on regression, not absolute green -----------------------
+BR=$(mkrepo)
+printf '#!/usr/bin/env bash\nif [ 1 ; then\n' > "$BR/legacy.sh"
+T  "baseline:red-before-baseline" bash -c "! (cd '$BR' && ./.claude/verify.sh)"
+printf 'sh-syntax\n' > "$BR/.claude/baseline"
+T  "baseline:preexisting-not-blocking" bash -c "cd '$BR' && ./.claude/verify.sh"
+T  "baseline:reports-preexisting" bash -c "cd '$BR' && ./.claude/verify.sh | grep -q 'still failing from baseline'"
+printf 'a: [1, 2\n' > "$BR/bad.yaml"
+TN "baseline:new-failure-still-blocks" bash -c "cd '$BR' && ./.claude/verify.sh"
+printf 'a: 1\n' > "$BR/bad.yaml"
+printf '#!/usr/bin/env bash\necho ok\n' > "$BR/legacy.sh"
+T  "baseline:flags-stale-entry" bash -c "cd '$BR' && ./.claude/verify.sh | grep -q 'NOW PASSING'"
+T  "audit:reports-all-not-just-first" bash -c "cd '$BR' && ./.claude/verify.sh --audit | grep -q '^PASS '"
+rm -rf "$BR"
+
+# ---- untracked-but-not-ignored files are still checked ----------------------
+UR=$(mkrepo)
+printf 'a: [1, 2\n' > "$UR/fresh.yaml"
+TN "discovery:untracked-file-checked" bash -c "cd '$UR' && ./.claude/verify.sh"
+rm -rf "$UR"
+
+# The harness's own .claude/ must never be treated as repo code, or every repo
+# would detect sh-syntax from verify.sh itself and no repo could report INERT.
+XR=$(mkrepo)
+T "discovery:excludes-dot-claude" bash -c "cd '$XR' && ./.claude/verify.sh --list | grep -qx NONE"
+rm -rf "$XR"
+
 echo "----"
 if [ "$FAILURES" -eq 0 ]; then echo "base-test: all green"; else echo "base-test: $FAILURES failure(s)"; fi
 exit $((FAILURES > 0))

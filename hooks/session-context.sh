@@ -8,6 +8,13 @@
 set -u
 cd "$(jq -r '.cwd // "."')" 2>/dev/null || exit 0
 
+# Project-level harness wins — see stop-gate.sh. Without this, a repo with its
+# own SessionStart hook prints two context blocks that may disagree.
+for f in .claude/settings.json .claude/settings.local.json; do
+  [ -f "$f" ] || continue
+  jq -e '.hooks.SessionStart // empty | length > 0' "$f" >/dev/null 2>&1 && exit 0
+done
+
 if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   echo "branch: $(git branch --show-current 2>/dev/null)  |  last: $(git log -1 --oneline 2>/dev/null)"
   DIRTY=$(git status --porcelain 2>/dev/null | head -15)
