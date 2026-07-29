@@ -237,9 +237,9 @@ rm -rf "$SCD"
 # ---- install.sh dry-run is inert --------------------------------------------
 T "install:dry-run-clean" bash -c "'$HERE/install.sh' --dry-run | grep -q 'would:'"
 T "install:dry-run-no-writes" bash -c "
-  BEFORE=\$(ls -la \"\$HOME/.claude\" 2>/dev/null | md5 2>/dev/null || ls -la \"\$HOME/.claude\" | md5sum)
+  BEFORE=\$(ls -la \"\$HOME/.claude\" 2>/dev/null | shasum)
   '$HERE/install.sh' --dry-run >/dev/null
-  AFTER=\$(ls -la \"\$HOME/.claude\" 2>/dev/null | md5 2>/dev/null || ls -la \"\$HOME/.claude\" | md5sum)
+  AFTER=\$(ls -la \"\$HOME/.claude\" 2>/dev/null | shasum)
   [ \"\$BEFORE\" = \"\$AFTER\" ]"
 
 rm -rf "$W" "$GW" "$R" "$R2" "${R3:-}" "$R4" "$R5" "$R6" "$R7" "$R8" 2>/dev/null
