@@ -35,18 +35,6 @@
           }
         ]
       }
-    ],
-    "Stop": [
-      {
-        "hooks": [
-          {
-            "type": "command",
-            "command": "$HOME/.claude/hooks/stop-gate.sh",
-            "timeout": 900,
-            "statusMessage": "Running verification gate"
-          }
-        ]
-      }
     ]
   },
   "permissions": {

@@ -37,9 +37,6 @@ for f in "$SRC"/agents/*.md; do
   run cp "$f" "$DEST/agents/$(basename "$f")"
   say "  agent: $(basename "$f" .md)"
 done
-run mkdir -p "$DEST/skills/workflow"
-run cp "$SRC/skills/workflow/SKILL.md" "$DEST/skills/workflow/SKILL.md"
-say "  skill: workflow (opt-in)"
 
 # ---- global CLAUDE.md --------------------------------------------------------
 if [ -f "$DEST/CLAUDE.md" ] && ! grep -q 'Installed to `~/.claude/CLAUDE.md`' "$DEST/CLAUDE.md" 2>/dev/null; then

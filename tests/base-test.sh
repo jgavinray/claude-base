@@ -21,13 +21,10 @@ T "settings:hooks-use-HOME" bash -c "jq -r '.hooks[][].hooks[].command' '$HERE/s
 # repo is open, which is wrong for a globally-installed hook). Prose may mention it.
 T "settings:no-project-dir" bash -c "! jq -r '.hooks[][].hooks[].command' '$HERE/settings.json' | grep -q CLAUDE_PROJECT_DIR"
 
-for a in verifier code-reviewer qa-tester planner doc-manager; do
+for a in verifier code-reviewer qa-tester doc-manager; do
   T "agent:$a-frontmatter" bash -c "head -1 '$HERE/agents/$a.md' | grep -q -- '---'"
   T "agent:$a-name" bash -c "grep -q '^name: $a\$' '$HERE/agents/$a.md'"
 done
-T "skill:workflow-opt-in" grep -q "This is opt-in" "$HERE/skills/workflow/SKILL.md"
-T "skill:uses-Agent-tool" grep -q "via the \*\*Agent\*\*" "$HERE/skills/workflow/SKILL.md"
-T "skill:no-Task-tool" bash -c "! grep -q 'via the Task tool' '$HERE/skills/workflow/SKILL.md'"
 T "settings:no-attribution" bash -c "jq -e '.attribution.commit == \"\" and .attribution.pr == \"\"' '$HERE/settings.json'"
 T "license:gplv2-present" bash -c "grep -q 'GNU GENERAL PUBLIC LICENSE' '$HERE/LICENSE' && grep -q 'Version 2, June 1991' '$HERE/LICENSE'"
 T "license:readme-states-gplv2" grep -q "GNU General Public License" "$HERE/README.md"
@@ -496,49 +493,6 @@ printf '{"a":\n' > "$W/bad.json"
 TN "postedit:bad-json-blocks" pec "$W/bad.json"
 T  "postedit:missing-file-noop" pec "$W/nope.py"
 
-# ---- stop-gate ---------------------------------------------------------------
-S="$HERE/hooks/stop-gate.sh"
-GW=$(mktemp -d); mkdir -p "$GW/.claude"
-sg() { printf '{"session_id":"%s","cwd":"%s","hook_event_name":"Stop"}' "$1" "$GW" | "$S"; }
-
-printf '#!/usr/bin/env bash\necho FAILMARK\nexit 1\n' > "$GW/.claude/verify.sh"
-chmod +x "$GW/.claude/verify.sh"
-
-# no edit marker => gate must not fire at all (the interactive-cost fix)
-SID2="basetest-noedit-$$"
-rm -f "$TMP/claude-base-edited-$SID2" "$TMP/claude-base-stopgate-$SID2"
-OUT=$(sg "$SID2")
-if [ -z "$OUT" ]; then ok "stopgate:silent-without-edits"; else bad "stopgate:silent-without-edits" "emitted: $OUT"; fi
-
-# with marker + failing verifier => block
-SID3="basetest-edit-$$"
-rm -f "$TMP/claude-base-stopgate-$SID3"; : > "$TMP/claude-base-edited-$SID3"
-OUT=$(sg "$SID3")
-T "stopgate:blocks-on-fail" bash -c "printf '%s' '$OUT' | jq -e '.decision == \"block\"'"
-T "stopgate:includes-output"  bash -c "printf '%s' '$OUT' | grep -q FAILMARK"
-T "stopgate:counter-incremented" test -f "$TMP/claude-base-stopgate-$SID3"
-
-# passing verifier => silent, and both marker + counter cleared
-printf '#!/usr/bin/env bash\nexit 0\n' > "$GW/.claude/verify.sh"
-OUT=$(sg "$SID3")
-if [ -z "$OUT" ]; then ok "stopgate:silent-on-pass"; else bad "stopgate:silent-on-pass" "emitted: $OUT"; fi
-T "stopgate:marker-cleared"  bash -c "[ ! -f '$TMP/claude-base-edited-$SID3' ]"
-T "stopgate:counter-cleared" bash -c "[ ! -f '$TMP/claude-base-stopgate-$SID3' ]"
-
-# cap released
-printf '#!/usr/bin/env bash\nexit 1\n' > "$GW/.claude/verify.sh"
-SID4="basetest-cap-$$"; : > "$TMP/claude-base-edited-$SID4"
-echo 8 > "$TMP/claude-base-stopgate-$SID4"
-OUT=$(sg "$SID4")
-T "stopgate:cap-releases" bash -c "printf '%s' '$OUT' | jq -e '.systemMessage | test(\"cap\")'"
-T "stopgate:cap-no-block" bash -c "! printf '%s' '$OUT' | jq -e '.decision' >/dev/null 2>&1"
-
-# no verifier at all => silent
-rm -f "$GW/.claude/verify.sh"
-SID5="basetest-noverify-$$"; : > "$TMP/claude-base-edited-$SID5"
-OUT=$(sg "$SID5")
-if [ -z "$OUT" ]; then ok "stopgate:silent-without-verifier"; else bad "stopgate:silent-without-verifier"; fi
-
 # ---- verify.sh ---------------------------------------------------------------
 V="$HERE/verify/verify.sh"
 mkrepo() { local d; d=$(mktemp -d); git -C "$d" init -q; mkdir -p "$d/.claude"; cp "$V" "$d/.claude/verify.sh"; chmod +x "$d/.claude/verify.sh"; echo "$d"; }
@@ -615,8 +569,8 @@ T "install:dry-run-no-writes" bash -c "
   AFTER=\$(ls -la \"\$HOME/.claude\" 2>/dev/null | shasum)
   [ \"\$BEFORE\" = \"\$AFTER\" ]"
 
-rm -rf "$W" "$GW" "$R" "$R2" "${R3:-}" "$R4" "$R5" "$R6" "$R7" "$R8" 2>/dev/null
-rm -f "$TMP/claude-base-edited-basetest-"* "$TMP/claude-base-stopgate-basetest-"* 2>/dev/null
+rm -rf "$W" "$R" "$R2" "${R3:-}" "$R4" "$R5" "$R6" "$R7" "$R8" 2>/dev/null
+rm -f "$TMP/claude-base-edited-basetest-"* 2>/dev/null
 
 
 # ---- project-level harness takes precedence ---------------------------------
@@ -624,17 +578,10 @@ rm -f "$TMP/claude-base-edited-basetest-"* "$TMP/claude-base-stopgate-basetest-"
 # harness must not get two gates.
 PW=$(mktemp -d); mkdir -p "$PW/.claude"
 printf '#!/usr/bin/env bash\necho OWNFAIL\nexit 1\n' > "$PW/.claude/verify.sh"; chmod +x "$PW/.claude/verify.sh"
-SIDP="basetest-proj-$$"; : > "$TMP/claude-base-edited-$SIDP"
-printf '{"hooks":{"Stop":[{"hooks":[{"type":"command","command":"x"}]}]}}' > "$PW/.claude/settings.json"
-OUT=$(printf '{"session_id":"%s","cwd":"%s"}' "$SIDP" "$PW" | "$S")
-if [ -z "$OUT" ]; then ok "defer:stopgate-yields-to-project"; else bad "defer:stopgate-yields-to-project" "emitted: $OUT"; fi
-printf '{"hooks":{"PreToolUse":[]}}' > "$PW/.claude/settings.json"
-OUT=$(printf '{"session_id":"%s","cwd":"%s"}' "$SIDP" "$PW" | "$S")
-T "defer:stopgate-runs-without-project-stop" bash -c "printf '%s' '$OUT' | jq -e '.decision == \"block\"'"
 printf '{"hooks":{"SessionStart":[{"hooks":[{"type":"command","command":"x"}]}]}}' > "$PW/.claude/settings.json"
 SCOUT=$(printf '{"cwd":"%s"}' "$PW" | "$SC" 2>/dev/null)
 if [ -z "$SCOUT" ]; then ok "defer:sessctx-yields-to-project"; else bad "defer:sessctx-yields-to-project"; fi
-rm -rf "$PW"; rm -f "$TMP/claude-base-edited-$SIDP" "$TMP/claude-base-stopgate-$SIDP"
+rm -rf "$PW"
 
 # ---- baseline: gate on regression, not absolute green -----------------------
 BR=$(mkrepo)

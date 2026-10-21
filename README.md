@@ -13,10 +13,10 @@ that setting. What's here is the part that is true in every repo.
 
 An external program, not the model, decides whether work is done.
 
-`.claude/verify.sh` exits 0 or it doesn't. The `Stop` hook reads that exit code
-and refuses to let the session end while it's nonzero, injecting the failure
-output as feedback. The model can't declare victory, and it can't talk its way
-past a red check. Everything else here supports that.
+`.claude/verify.sh` exits 0 or it doesn't. The model can't declare victory, and
+it can't talk its way past a red check. Everything else here supports that. (The
+automatic `Stop`-hook gate that used to enforce it was retired on 10/20/2026; the
+verifier, the guard and the per-edit checks remain.)
 
 The corollary matters just as much: **a gate that isn't armed must say so.** A
 verifier that runs no checks and exits 0 is worse than no verifier, because it
@@ -33,11 +33,9 @@ hooks/
   session-context.sh SessionStart: branch, dirty files, and whether the gate has teeth
   pretool-guard.sh   PreToolUse(Bash): two-tier deny/ask on destructive commands
   jev-shadow.sh      secret masking plus the background shadow call to the Jev service
-  post-edit-check.sh PostToolUse(Edit|Write): instant syntax check; arms the Stop gate
-  stop-gate.sh       Stop: blocks until verify.sh exits 0 (edit-triggered)
+  post-edit-check.sh PostToolUse(Edit|Write): instant syntax check
 verify/verify.sh     the auto-detecting verifier -> <repo>/.claude/verify.sh
-agents/              planner, qa-tester, verifier, code-reviewer, doc-manager
-skills/workflow/     opt-in state machine for multi-step work
+agents/              qa-tester, verifier, code-reviewer, doc-manager
 templates/           project CLAUDE.md skeleton
 tests/base-test.sh   206 checks; claude-base gates itself with its own contract
 install.sh           install the global layer
@@ -62,8 +60,8 @@ events it owns, unions `permissions.deny`, and sets `attribution` to empty so
 commits and PRs carry no generated-by trailer. Re-running is idempotent.
 
 **Repos that carry their own harness are left alone.** Hooks from `~/.claude`
-and `<repo>/.claude` *merge* — both sets run — so a project with its own `Stop`
-hook would otherwise run two verifiers on every stop. The global hooks detect a
+and `<repo>/.claude` *merge* — both sets run — so a project with its own
+`SessionStart` hook would otherwise print two context blocks. The global hooks detect a
 project-level registration for the same event and step aside, per event.
 
 **Global, not per-repo** — the inverse of the original harness's recommendation.
@@ -78,7 +76,7 @@ Requires `jq`. Verify wiring with `/hooks` inside Claude Code.
 
 **Cloning a repo requires no setup.** Global hooks apply everywhere
 automatically, and a repo with no `.claude/verify.sh` simply has no gate — the
-Stop hook exits silently, the guard and per-edit syntax checks stay active, and
+guard and per-edit syntax checks stay active, and
 SessionStart reports `GATE ABSENT` so a green result is never implied. There is
 no preflight. `init-repo.sh` is how you opt a repo *in*, when you want one.
 
@@ -177,12 +175,7 @@ average, not less. Use `--local` to keep `.claude/` in `.git/info/exclude` so
 the harness never shows up in a pull request; it's suggested automatically when
 an `upstream` remote exists.
 
-## Two things that differ from the original harness
-
-**The Stop gate is edit-triggered.** `post-edit-check.sh` drops a
-session-keyed marker; `stop-gate.sh` exits immediately when there isn't one. The
-original ran the full verifier on every stop event, including answering a
-question — unusable in a repo whose verifier renders 200 manifests.
+## One thing that differs from the original harness
 
 **The guard has two tiers.** DENY for the unrecoverable (namespace deletion,
 `terraform destroy`, `helm uninstall`, PV/PVC deletion, force-push without
