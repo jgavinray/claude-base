@@ -53,6 +53,11 @@ N=$(printf '%s' "$CMD" | perl -0777 -pe 's/\\\n/ /g; s/\n/ ; /g' | tr -s '[:spac
 # the like. Used where a word could also appear in a message or an argument
 # (`git commit -m "drop git reset --hard"` is not a reset).
 CP='(^|[;&|(] *|(sudo|then|do|xargs|-c) +|ssh +[^ ]+ +)'
+# Global flag between the tool and its subcommand: `-x`, `--name`,
+# `--name=v` or `--name v`, in any number. Each token ends in the space after
+# the flag or its value; a value stops at `;` `&` `|` `(` `)`, so the match
+# cannot run across a command separator into a different command.
+GAP='(-{1,2}[A-Za-z0-9_-]+(=[^ ;&|()]*)?( +[^ ;&|()]+)? +)'
 
 # Disable globbing before any word-splitting loop below. Without this, iterating
 # an unquoted `rm -rf *` expands the `*` against the hook's own cwd and the
@@ -292,20 +297,22 @@ m ':\(\) *\{ *: *\| *: *& *\} *;:'            && decide deny "pretool-guard: for
 m '(^|[;&|(] *|sudo +|ssh +[^ ]+ +)(shutdown|reboot|halt|poweroff)\b|systemctl +(reboot|poweroff|halt)\b' && decide deny "pretool-guard: host power control — blocked."
 
 # Kubernetes: namespace and storage deletion are not recoverable from git
-m 'kubectl +.*delete +.*(namespace|^ns | ns )' && decide deny "pretool-guard: namespace deletion — blocked. Delete specific resources instead."
-m 'kubectl +.*delete +.*--all'                 && decide deny "pretool-guard: --all deletion — blocked. Name the resource explicitly."
-m 'kubectl +.*delete +.*(persistentvolume|\bpvc\b|\bpv\b)' && decide deny "pretool-guard: PV/PVC deletion destroys data — blocked."
-m 'helm +(uninstall|delete) '                  && decide deny "pretool-guard: helm uninstall — blocked. Use a targeted rollback."
-m 'argocd +app +delete'                        && decide deny "pretool-guard: argocd app delete — blocked."
-m 'flux +uninstall'                            && decide deny "pretool-guard: flux uninstall — blocked."
+m 'kubectl +[^;&|()]*delete +[^;&|()]*(namespace|^ns | ns )' && decide deny "pretool-guard: namespace deletion — blocked. Delete specific resources instead."
+m 'kubectl +[^;&|()]*delete +[^;&|()]*--all'   && decide deny "pretool-guard: --all deletion — blocked. Name the resource explicitly."
+m 'kubectl +[^;&|()]*delete +[^;&|()]*(persistentvolume|\bpvc\b|\bpv\b)' && decide deny "pretool-guard: PV/PVC deletion destroys data — blocked."
+m "helm +${GAP}*(uninstall|delete) "           && decide deny "pretool-guard: helm uninstall — blocked. Use a targeted rollback."
+m "argocd +${GAP}*app +delete"                 && decide deny "pretool-guard: argocd app delete — blocked."
+m "flux +${GAP}*uninstall"                     && decide deny "pretool-guard: flux uninstall — blocked."
+PUT 303.:303:
+m "terraform +${GAP}*destroy"                 && decide deny "pretool-guard: terraform destroy — blocked."
 
 # Infrastructure as code
 m 'terraform +destroy'                         && decide deny "pretool-guard: terraform destroy — blocked."
 
 # Cloud CLIs
-m 'aws +s3 +(rb|rm +.*--recursive)'            && decide deny "pretool-guard: recursive S3 delete — blocked."
-m 'aws +.*delete-(cluster|bucket|stack|db-instance|table)' && decide deny "pretool-guard: AWS resource deletion — blocked."
-m 'az +group +delete'                          && decide deny "pretool-guard: Azure resource-group delete — blocked."
+m "aws +${GAP}*s3 +(rb|rm +[^;&|()]*--recursive)" && decide deny "pretool-guard: recursive S3 delete — blocked."
+m 'aws +[^;&|()]*delete-(cluster|bucket|stack|db-instance|table)' && decide deny "pretool-guard: AWS resource deletion — blocked."
+m "az +${GAP}*group +delete"                   && decide deny "pretool-guard: Azure resource-group delete — blocked."
 m 'gcloud +.*(projects|clusters|instances) +delete' && decide deny "pretool-guard: GCP resource deletion — blocked."
 
 # Data
@@ -357,8 +364,8 @@ if m "${CP}git +(-C +[^ ]+ +)?clean +-[a-zA-Z]*f"; then
 fi
 
 # ------------------------------------------------------------------- ASK tier
-m 'kubectl +.*delete '        && decide ask "pretool-guard: this deletes a live Kubernetes resource. Confirm?"
-m 'terraform +apply'          && decide ask "pretool-guard: terraform apply mutates real infrastructure. Confirm?"
-m '(npm +publish|cargo +publish|twine +upload|gh +release +create)' && decide ask "pretool-guard: this publishes externally and cannot be unpublished cleanly. Confirm?"
+m 'kubectl +[^;&|()]*delete ' && decide ask "pretool-guard: this deletes a live Kubernetes resource. Confirm?"
+m "terraform +${GAP}*apply"  && decide ask "pretool-guard: terraform apply mutates real infrastructure. Confirm?"
+m "(npm +${GAP}*publish|cargo +${GAP}*publish|twine +${GAP}*upload|gh +${GAP}*release +create)" && decide ask "pretool-guard: this publishes externally and cannot be unpublished cleanly. Confirm?"
 
 exit 0
