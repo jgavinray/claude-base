@@ -54,6 +54,13 @@ N=$(printf '%s' "$CMD" | perl -0777 -pe 's/\\\n/ /g; s/\n/ ; /g' | tr -s '[:spac
 # (`git commit -m "drop git reset --hard"` is not a reset).
 CP='(^|[;&|(] *|(sudo|then|do|xargs|-c) +|ssh +[^ ]+ +)'
 
+# Global flags that may sit between a tool and its subcommand
+# (`terraform -chdir=infra destroy`, `helm -n prod uninstall web`). One
+# iteration is a dash-prefixed flag followed by an optional separate value (a
+# word not starting with `-`), so `--namespace prod` and `--profile=prod` both
+# match. Tokens exclude `; & |`, so the group cannot spill into a later command.
+GF='(--?[A-Za-z][^ ;&|]* +([^ ;&|-][^ ;&|]* +)?)*'
+
 # Disable globbing before any word-splitting loop below. Without this, iterating
 # an unquoted `rm -rf *` expands the `*` against the hook's own cwd and the
 # literal argument we need to catch disappears.
@@ -295,17 +302,17 @@ m '(^|[;&|(] *|sudo +|ssh +[^ ]+ +)(shutdown|reboot|halt|poweroff)\b|systemctl +
 m 'kubectl +.*delete +.*(namespace|^ns | ns )' && decide deny "pretool-guard: namespace deletion — blocked. Delete specific resources instead."
 m 'kubectl +.*delete +.*--all'                 && decide deny "pretool-guard: --all deletion — blocked. Name the resource explicitly."
 m 'kubectl +.*delete +.*(persistentvolume|\bpvc\b|\bpv\b)' && decide deny "pretool-guard: PV/PVC deletion destroys data — blocked."
-m 'helm +(uninstall|delete) '                  && decide deny "pretool-guard: helm uninstall — blocked. Use a targeted rollback."
-m 'argocd +app +delete'                        && decide deny "pretool-guard: argocd app delete — blocked."
-m 'flux +uninstall'                            && decide deny "pretool-guard: flux uninstall — blocked."
+m "helm +${GF}(uninstall|delete) "             && decide deny "pretool-guard: helm uninstall — blocked. Use a targeted rollback."
+m "argocd +${GF}app +delete"                    && decide deny "pretool-guard: argocd app delete — blocked."
+m "flux +${GF}uninstall"                        && decide deny "pretool-guard: flux uninstall — blocked."
 
 # Infrastructure as code
-m 'terraform +destroy'                         && decide deny "pretool-guard: terraform destroy — blocked."
+m "terraform +${GF}destroy"                     && decide deny "pretool-guard: terraform destroy — blocked."
 
 # Cloud CLIs
-m 'aws +s3 +(rb|rm +.*--recursive)'            && decide deny "pretool-guard: recursive S3 delete — blocked."
+m "aws +${GF}s3 +${GF}(rb|rm +[^;&|]*--recursive)" && decide deny "pretool-guard: recursive S3 delete — blocked."
 m 'aws +.*delete-(cluster|bucket|stack|db-instance|table)' && decide deny "pretool-guard: AWS resource deletion — blocked."
-m 'az +group +delete'                          && decide deny "pretool-guard: Azure resource-group delete — blocked."
+m "az +${GF}group +delete"                      && decide deny "pretool-guard: Azure resource-group delete — blocked."
 m 'gcloud +.*(projects|clusters|instances) +delete' && decide deny "pretool-guard: GCP resource deletion — blocked."
 
 # Data
@@ -377,7 +384,7 @@ fi
 
 # ------------------------------------------------------------------- ASK tier
 m 'kubectl +.*delete '        && decide ask "pretool-guard: this deletes a live Kubernetes resource. Confirm?"
-m 'terraform +apply'          && decide ask "pretool-guard: terraform apply mutates real infrastructure. Confirm?"
-m '(npm +publish|cargo +publish|twine +upload|gh +release +create)' && decide ask "pretool-guard: this publishes externally and cannot be unpublished cleanly. Confirm?"
+m "terraform +${GF}apply"      && decide ask "pretool-guard: terraform apply mutates real infrastructure. Confirm?"
+m "(npm +${GF}publish|cargo +${GF}publish|twine +upload|gh +release +create)" && decide ask "pretool-guard: this publishes externally and cannot be unpublished cleanly. Confirm?"
 
 exit 0
