@@ -584,7 +584,9 @@ mask() { # stdin → masked text; fails if the masker is missing, so nothing unm
   "$SHADOW" redact
 }
 
+LOGGED=""
 log_line() { # decision, source, [reason]
+  LOGGED=1
   [ -n "$LOG" ] || return 0
   mkdir -p "${LOG%/*}" 2>/dev/null || return 0
   local c; c=$(printf '%s' "$CMD" | mask 2>/dev/null | tr '\n' ' ' | cut -c1-300)
@@ -594,6 +596,7 @@ log_line() { # decision, source, [reason]
 }
 
 deny() { # reason
+  [ -n "$LOGGED" ] || log_line deny det "session pid ${SESSION_PID:-?}"
   jq -n --arg r "$1" '{hookSpecificOutput: {hookEventName: "PreToolUse", permissionDecision: "deny", permissionDecisionReason: $r}}'
   exit 0
 }
@@ -674,7 +677,7 @@ fi
 JEV_ENFORCE=0; [ -e "${SCOPE_CHECK_JEV_ENFORCE_FILE:-$HOME/.claude/scope-check-jev-enforce}" ] && JEV_ENFORCE=1
 JEV_N=$(printf '%s' "$CLS" | jq '[.triggers[] | select((.class=="signal" and .remote==0) | not)] | length')
 if [ "$MODE" = hook ]; then
-  [ "$JEV_N" -gt 0 ] || { log_line allow det "signals this session started"; exit 0; }
+  [ "$JEV_N" -gt 0 ] || { log_line allow det "signals this session started (session pid ${SESSION_PID:-?})"; exit 0; }
   if [ "$JEV_ENFORCE" = 0 ]; then
     printf '%s' "$INPUT" | "${BASH_SOURCE[0]}" shadow >/dev/null 2>&1 &
     exit 0
