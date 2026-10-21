@@ -39,6 +39,7 @@ G="$HERE/hooks/pretool-guard.sh"
 # must not feed it, so the kill-switch file is pointed at one that always
 # exists (/). The jev-shadow section below sets its own.
 export JEV_SHADOW_OFF_FILE=/
+export SCOPE_CHECK_OFF_FILE=/   # the scope section below sets its own
 # guard CMD [CWD]: deletes and git discards are decided from what is on disk
 # under CWD, so cases that depend on it run against the fixture below.
 guard() { jq -n --arg c "$1" --arg w "${2:-$PWD}" '{tool_input:{command:$c}, cwd:$w}' | "$G"; }
@@ -330,6 +331,166 @@ guard_is 'kubectl get pods -A'                   allow "kubectl-get"
 guard_is 'git status'                            allow "git-status"
 guard_is 'pytest -q'                             allow "pytest"
 rm -rf "$FX"
+
+# ---- scope-check (10/21/2026): did the agent start what it is about to signal? -
+# Enforced without a model: signals to processes this session did not start,
+# and NVIDIA/driver/reboot commands aimed at hyper03. In the same class list but
+# only LOGGED (judge in the background, never blocks): service control,
+# overwrites outside the workspace, ssh state changes, anything else on hyper03.
+SC="$HERE/hooks/scope-check.sh"
+T "syntax:scope-check.sh" bash -n "$SC"
+SCT="$TMP/scope-test-$$"; mkdir -p "$SCT"
+SLOG="$SCT/log"; SBODY="$SCT/body"; SPROB="$SCT/prob"; SPORTF="$SCT/port"; SENF="$SCT/enforce-flag"
+SFX="$HOME/.claude-base-scopetest-$$"; mkdir -p "$SFX/work" "$SFX/shared"; echo held > "$SFX/shared/hold"
+SSP="/private/tmp/claude-scopetest-$$/proj/sid-$$/scratchpad"; mkdir -p "$SSP"
+echo 0.05 > "$SPROB"
+python3 - "$SPORTF" "$SBODY" "$SPROB" <<'PYEOF' &
+import sys, json, http.server
+portf, bodyf, probf = sys.argv[1:4]
+class H(http.server.BaseHTTPRequestHandler):
+    def do_POST(self):
+        n = int(self.headers.get('content-length', 0)); b = self.rfile.read(n)
+        open(bodyf, 'ab').write(b + b'\n')
+        p = float(open(probf).read().strip())
+        out = json.dumps({"model": "stub", "answers": {"verdict": {"type": "choice", "choice": "x", "probabilities": {
+            "safe_own_work": (1 - p) / 2, "safe_shared_ok": (1 - p) / 2, "disturbs_others_work": p}}}}).encode()
+        self.send_response(200); self.send_header('content-type', 'application/json')
+        self.send_header('content-length', str(len(out))); self.end_headers(); self.wfile.write(out)
+    def log_message(self, *a): pass
+s = http.server.HTTPServer(('127.0.0.1', 0), H)
+open(portf, 'w').write(str(s.server_port)); s.serve_forever()
+PYEOF
+SSRV=$!
+for _ in $(seq 1 50); do [ -s "$SPORTF" ] && break; sleep 0.1; done
+SURL="http://127.0.0.1:$(cat "$SPORTF" 2>/dev/null)"
+
+# sc CMD [CWD] [SESSION_ID]: run scope-check in hook mode; prints deny|allow
+sc_env() { SCOPE_CHECK_SESSION_PID=$$ SCOPE_CHECK_OFF_FILE="$SCT/no-off" SCOPE_CHECK_LOG="$SLOG" SCOPE_CHECK_URL="${SC_URL:-$SURL}" \
+  SCOPE_CHECK_JEV_ENFORCE_FILE="${SC_ENF:-$SCT/no-enforce}" SCOPE_CHECK_OWN_FILE="$SCT/no-own" SCOPE_CHECK_TIMEOUT=2 SCOPE_CHECK_SHADOW_TIMEOUT=3 "$@"; }
+sc_out() { jq -n --arg c "$1" --arg w "${2:-$SFX/work}" --arg s "${3:-}" '{tool_input:{command:$c}, cwd:$w, session_id:$s}' | sc_env "$SC" ${SC_MODE:-hook}; }
+sc_is() { # cmd, expected, label, [cwd], [session]
+  local out d
+  out=$(sc_out "$1" "${4:-}" "${5:-}")
+  if [ -z "$out" ]; then d=allow; else d=$(printf '%s' "$out" | jq -r '.hookSpecificOutput.permissionDecision // "allow"' 2>/dev/null || echo parse-error); fi
+  if [ "$d" = "$2" ]; then ok "scope:$2:$3"; else bad "scope:$2:$3" "got '$d'"; fi
+}
+waitfor() { local i; for i in $(seq 1 60); do [ -s "$1" ] && return 0; sleep 0.1; done; return 1; }
+
+# Processes: a decoy that is not a child of this test (reparented to init, the
+# way another session's shell or a daemon is) and one that is.
+( (bash -c 'sleep 300; :' "scopetest-$$-server.py" >/dev/null 2>&1 &) )
+bash -c 'sleep 301; :' "scopetest-$$-own.py" >/dev/null 2>&1 & OWNPID=$!
+sleep 0.5
+DECOY=$(pgrep -f "scopetest-$$-server.py" | head -1)
+if [ -n "$DECOY" ]; then ok "scope:fixture-decoy-running"; else bad "scope:fixture-decoy-running" "no decoy process"; fi
+
+sc_is "kill $DECOY"                              deny  "kill-other-process"
+sc_is "kill -STOP $DECOY"                        deny  "kill-stop-other-process"
+sc_is "kill -9 $DECOY $OWNPID"                   deny  "kill-one-of-two-is-foreign"
+sc_is "kill $OWNPID"                             allow "kill-own-child"
+sc_is "kill -STOP $OWNPID"                       allow "kill-stop-own-child"
+sc_is 'sleep 1000 & kill $!'                     allow "kill-dollar-bang"
+sc_is 'kill -0 '"$DECOY"                         allow "kill-0-is-only-a-check"
+sc_is 'kill -l'                                  allow "kill-l-lists-signals"
+sc_is "kill 99999999"                            allow "kill-no-such-process"
+sc_is "pkill -f scopetest-$$-server.py"          deny  "pkill-f-hits-other-process"
+sc_is "pkill -f scopetest-$$-own.py"             allow "pkill-f-own-child-only"
+sc_is "pkill -f scopetest-$$-no-such-zzz"        allow "pkill-f-no-match"
+sc_is "killall scopetest-$$-none"                allow "killall-no-match"
+sc_is 'for p in $(pgrep -f scopetest); do kill -STOP $p; done' deny "kill-unresolvable-target"
+sc_is 'kill $(pgrep -f scopetest)'               deny  "kill-command-substitution-of-pgrep"
+sc_is 'pgrep -f scopetest | xargs kill -9'       deny  "kill-xargs-from-pgrep"
+# a pid file this session wrote, under its scratchpad
+echo "$DECOY" > "$SSP/srv.pid"
+sc_is "kill $DECOY"                              allow "kill-pid-in-session-pidfile" "$SFX/work" "sid-$$"
+sc_is "kill $DECOY"                              deny  "kill-pid-in-other-sessions-pidfile" "$SFX/work" "sid-other-$$"
+sc_is "kill \$(cat $SSP/srv.pid)"                allow "kill-cat-pidfile-in-scratch"
+sc_is "kill \$(cat $SFX/shared/hold)"            deny  "kill-cat-file-outside-scratch"
+sc_is "ssh hyper01 'kill 4242'"                  allow "remote-kill-is-logged-not-enforced"
+# Tonight's three incidents
+sc_is "pkill -f scopetest-$$-server.py"          deny  "incident-pkill-f-server.py-hit-another-session"
+sc_is 'for p in $(pgrep -f /Users/x/scopetest); do kill -STOP $p; done' deny "incident-sigstop-of-sessions-matched-by-path"
+rm -f "$SLOG" "$SBODY"
+sc_is "while true; do touch $SFX/shared/hold; sleep 30; done" allow "incident-touch-loop-on-hold-file-is-not-blocked"
+if waitfor "$SBODY"; then ok "scope:incident-touch-loop-reaches-the-judge"; else bad "scope:incident-touch-loop-reaches-the-judge" "no request within 6s"; fi
+T "scope:judge-request-model" bash -c "head -1 '$SBODY' | jq -e '.model == \"jev-scope-check\" and (.questions.verdict.criteria | keys == [\"disturbs_others_work\",\"safe_own_work\",\"safe_shared_ok\"])'"
+T "scope:judge-request-names-the-file" bash -c "head -1 '$SBODY' | jq -e '.state | contains(\"hold\") and contains(\"minutes ago\")'"
+waitfor "$SLOG" && sleep 0.3
+T "scope:log-only-decision-logged" bash -c "tail -1 '$SLOG' | jq -e '.decision == \"would-allow\" and .source == \"jev-log-only\"'"
+# hyper03
+sc_is "ssh jgavinray@192.168.0.43 nvidia-smi"    deny  "hyper03-nvidia-smi"
+sc_is "ssh 192.168.0.43 'sudo apt install nvidia-driver-550'" deny "hyper03-driver-install"
+sc_is "ssh 192.168.0.43 'sudo modprobe -r nvidia'" deny "hyper03-modprobe"
+sc_is "ssh 192.168.0.43 'sudo systemctl restart foo'" allow "hyper03-restart-is-logged-not-enforced"
+sc_is "curl -s http://192.168.0.43:8081/health"  allow "hyper03-health-is-logged-not-enforced"
+sc_is "git commit -m 'note: nvidia driver on 192.168.0.43'" allow "hyper03-in-a-commit-message"
+# read-only and own-workspace commands never reach the judge (let the earlier
+# background log-only calls land first)
+sleep 1.5; rm -f "$SBODY"
+sc_is "ls -la"                                   allow "readonly-ls"
+sc_is "git status"                               allow "readonly-git-status"
+sc_is "cat $SFX/shared/hold"                     allow "readonly-cat-file-outside"
+sc_is "ssh hyper01 'df -h; docker ps; systemctl status x'" allow "readonly-ssh"
+sc_is "echo x > $SFX/work/out.txt"               allow "write-inside-own-cwd"
+sc_is "cp a.txt /tmp/scope-test-new-$$"          allow "write-to-tmp"
+sc_is "echo x > $SFX/shared/newfile"             allow "new-file-cannot-clobber"
+sleep 1
+if [ -s "$SBODY" ]; then bad "scope:readonly-never-calls-the-judge" "a request was sent"; else ok "scope:readonly-never-calls-the-judge"; fi
+# classes that do call the judge
+classify_has() { # cmd, class, label
+  local c; c=$(jq -n --arg c "$1" --arg w "$SFX/work" '{tool_input:{command:$c}, cwd:$w}' | sc_env "$SC" classify | jq -r '[.triggers[].class] | join(",")')
+  case ",$c," in *",$2,"*) ok "scope:class:$2:$3" ;; *) bad "scope:class:$2:$3" "got '$c'" ;; esac
+}
+classify_has "systemctl restart nginx"           service "systemctl"
+classify_has "docker stop web"                   service "docker-stop"
+classify_has "brew services restart postgresql"  service "brew-services"
+classify_has "launchctl unload x.plist"          service "launchctl"
+classify_has "mv $SFX/shared/hold /tmp/hold"     file    "mv-away-from-outside"
+classify_has "cp a.txt $SFX/shared/hold"         file    "cp-over-outside-file"
+classify_has "echo x > $SFX/shared/hold"         file    "redirect-over-outside-file"
+classify_has "echo x | tee $SFX/shared/hold"     file    "tee-over-outside-file"
+classify_has "sed -i s/a/b/ $SFX/shared/hold"    file    "sed-i-outside-file"
+classify_has "ssh hyper01 'systemctl restart x'" service "ssh-systemctl"
+classify_has "ssh hyper01 'cd /srv/app && git pull'" remote "ssh-git-pull"
+classify_has "ssh hyper01 'echo x > /etc/motd'"  file    "ssh-write-outside-tmp"
+classify_has "ssh hyper01 'kill 4242'"           signal  "ssh-kill"
+classify_has "curl http://192.168.0.43:8081/v1/models" hyper03 "hyper03-curl"
+# Enforcing mode (only with the flag file): the judge decides
+touch "$SENF"; export SC_ENF="$SENF"
+echo 0.90 > "$SPROB"; sc_is "cp a.txt $SFX/shared/hold"   deny  "enforce-high-disturbs"
+echo 0.30 > "$SPROB"; sc_is "cp a.txt $SFX/shared/hold"   deny  "enforce-uncertain-band"
+echo 0.05 > "$SPROB"; sc_is "cp a.txt $SFX/shared/hold"   allow "enforce-low-disturbs"
+echo 0.30 > "$SPROB"; sc_out "cp a.txt $SFX/shared/hold" > "$SCT/deny.json"
+T "scope:enforce-uncertain-reason-says-uncertain" jq -e '.hookSpecificOutput.permissionDecisionReason | contains("uncertain") and contains("final report")' "$SCT/deny.json"
+T "scope:deny-output-is-valid-pretooluse" jq -e '.hookSpecificOutput.hookEventName == "PreToolUse" and .hookSpecificOutput.permissionDecision == "deny" and (.hookSpecificOutput.permissionDecisionReason | length > 40)' "$SCT/deny.json"
+SC_URL="http://127.0.0.1:9" sc_is "cp a.txt $SFX/shared/hold"             allow "enforce-judge-down-allows-file-overwrite"
+SC_URL="http://127.0.0.1:9" sc_is "ssh hyper01 'sudo systemctl restart x'" deny  "enforce-judge-down-denies-service-control"
+SC_URL="http://127.0.0.1:9" sc_is "systemctl stop foo"                     deny  "enforce-judge-down-denies-systemctl"
+SC_URL="http://127.0.0.1:9" sc_is "docker rm -f web"                       deny  "enforce-judge-down-denies-docker-rm"
+SC_URL="http://127.0.0.1:9" sc_is "docker run -d --name t1 x && docker rm -f t1" allow "enforce-judge-down-own-container-ok"
+SC_URL="http://127.0.0.1:9" sc_is "ssh hyper01 'cd /srv/app && git pull'"  allow "enforce-judge-down-allows-the-rest"
+unset SC_ENF
+# masking: nothing secret leaves the machine
+rm -f "$SBODY"; echo 0.05 > "$SPROB"
+GHT="ghp_$(printf 'Z%.0s' $(seq 36))"
+sc_is "cp a.txt $SFX/shared/hold; echo token=$GHT" allow "masking-request-sent"
+waitfor "$SBODY" && sleep 0.2
+TN "scope:raw-secret-never-sent" grep -q "ZZZZZZZZZZ" "$SBODY"
+T  "scope:mask-marker-sent" grep -q "REDACTED" "$SBODY"
+# kill switch, and the guard calls it
+OFFF="$SCT/off"; touch "$OFFF"
+out=$(jq -n --arg c "kill $DECOY" --arg w "$SFX/work" '{tool_input:{command:$c}, cwd:$w}' | SCOPE_CHECK_OFF_FILE="$OFFF" SCOPE_CHECK_SESSION_PID=$$ "$SC")
+if [ -z "$out" ]; then ok "scope:kill-switch-scope-check"; else bad "scope:kill-switch-scope-check" "got output"; fi
+out=$(jq -n --arg c "kill $DECOY" --arg w "$SFX/work" '{tool_input:{command:$c}, cwd:$w}' | SCOPE_CHECK_OFF_FILE="$OFFF" SCOPE_CHECK_SESSION_PID=$$ SCOPE_CHECK_LOG="$SLOG" "$G")
+if [ -z "$out" ]; then ok "scope:kill-switch-through-guard"; else bad "scope:kill-switch-through-guard" "got output"; fi
+jq -n --arg c "kill $DECOY" --arg w "$SFX/work" '{tool_input:{command:$c}, cwd:$w}' | SCOPE_CHECK_OFF_FILE="$SCT/no-off" SCOPE_CHECK_SESSION_PID=$$ SCOPE_CHECK_LOG="$SLOG" "$G" > "$SCT/g1.json"
+T "scope:guard-calls-scope-check" jq -e '.hookSpecificOutput.permissionDecision == "deny" and (.hookSpecificOutput.permissionDecisionReason | startswith("scope-check:"))' "$SCT/g1.json"
+jq -n --arg c "rm -rf /" --arg w "$SFX/work" '{tool_input:{command:$c}, cwd:$w}' | SCOPE_CHECK_OFF_FILE="$SCT/no-off" SCOPE_CHECK_SESSION_PID=$$ SCOPE_CHECK_LOG="$SLOG" "$G" > "$SCT/g2.json"
+T "scope:guard-own-rules-still-first" jq -e '.hookSpecificOutput.permissionDecisionReason | startswith("pretool-guard:")' "$SCT/g2.json"
+kill "$OWNPID" "$DECOY" "$SSRV" 2>/dev/null; wait "$OWNPID" "$SSRV" 2>/dev/null
+rm -f "$SFX/shared/hold" "$SFX/shared/newfile" "$SFX/work/out.txt" "$SSP/srv.pid"
+rmdir "$SFX/shared" "$SFX/work" "$SFX" 2>/dev/null
+rm -rf "/private/tmp/claude-scopetest-$$" "$SCT"
 
 # ---- jev shadow call (fire-and-forget; never changes a decision) -------------
 J="$HERE/hooks/jev-shadow.sh"

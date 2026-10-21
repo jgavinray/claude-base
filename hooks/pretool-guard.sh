@@ -556,4 +556,20 @@ m 'kubectl +.*delete '        && decide ask "pretool-guard: this deletes a live 
 m "terraform +${GF}apply"      && decide ask "pretool-guard: terraform apply mutates real infrastructure. Confirm?"
 m "(npm +${GF}publish|cargo +${GF}publish|twine +upload|gh +release +create)" && decide ask "pretool-guard: this publishes externally and cannot be unpublished cleanly. Confirm?"
 
+# ------------------------------------------------------------- scope check
+# Commands the rules above allow, but which signal, stop or overwrite things
+# outside this session's own workspace (10/21/2026). scope-check.sh denies
+# signals to processes the session did not start and NVIDIA/driver/reboot
+# commands aimed at hyper03 itself; everything else in its class list is sent to
+# Jev in the background and only logged. Kill switch: ~/.claude/scope-check-off.
+# Doc: wiki/scope-check.md.
+SCOPE_CHECK="${0%/*}/scope-check.sh"
+if [ -x "$SCOPE_CHECK" ] && [ ! -e "${SCOPE_CHECK_OFF_FILE:-$HOME/.claude/scope-check-off}" ]; then
+  SCOPE_OUT=$(printf '%s' "$INPUT" | "$SCOPE_CHECK" 2>/dev/null) || SCOPE_OUT=""
+  if [ -n "$SCOPE_OUT" ] && printf '%s' "$SCOPE_OUT" | jq -e '.hookSpecificOutput.permissionDecision == "deny"' >/dev/null 2>&1; then
+    printf '%s\n' "$SCOPE_OUT"
+    exit 0
+  fi
+fi
+
 exit 0

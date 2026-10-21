@@ -33,6 +33,7 @@ hooks/
   session-context.sh SessionStart: branch, dirty files, and whether the gate has teeth
   pretool-guard.sh   PreToolUse(Bash): two-tier deny/ask on destructive commands
   jev-shadow.sh      secret masking plus the background shadow call to the Jev service
+  scope-check.sh     called by the guard: signals to processes the session did not start, hyper03, and a log-only Jev check
   post-edit-check.sh PostToolUse(Edit|Write): instant syntax check
 verify/verify.sh     the auto-detecting verifier -> <repo>/.claude/verify.sh
 agents/              qa-tester, verifier, code-reviewer, doc-manager
@@ -101,6 +102,23 @@ later. Nothing acts on the answer yet.
 - Settings: `JEV_SHADOW_URL` (default `http://192.168.0.44:8102`),
   `JEV_SHADOW_TIMEOUT` seconds (default 8).
 - `install.sh` copies `jev-shadow.sh` with the other hooks.
+
+## Scope check
+
+`scope-check.sh` (called by `pretool-guard.sh` for commands the guard allows)
+asks "does this touch work the agent did not start?". Since 10/21/2026:
+
+- **Enforced, no model:** `kill`/`pkill`/`killall` (also `-STOP`) deny unless the
+  target is a process this session started (a child of the session, started from
+  its scratchpad, or in a pid file in its scratchpad); a name or path pattern is
+  expanded with `pgrep` first. NVIDIA, driver and reboot commands aimed at
+  hyper03 (192.168.0.43) deny.
+- **Logged only:** service control, overwrites outside the workspace, ssh state
+  changes and other hyper03 use are sent to Jev in the background
+  (`model: jev-scope-check`) and the answer goes to `~/.claude/scope-check.log`.
+  Nothing waits for it. `touch ~/.claude/scope-check-jev-enforce` makes it decide.
+- **Kill switch:** `touch ~/.claude/scope-check-off`.
+- Doc: `wiki/scope-check.md` in the memory store.
 
 ## Reproducibility
 
