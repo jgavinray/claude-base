@@ -39,7 +39,7 @@
   },
   "permissions": {
     "deny": [
-      "Bash(rm -rf /*)",
+      "Bash(rm -rf /)",
       "Bash(mkfs*)",
       "Bash(terraform destroy*)",
       "Bash(helm uninstall*)",

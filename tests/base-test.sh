@@ -26,6 +26,7 @@ for a in verifier code-reviewer qa-tester doc-manager; do
   T "agent:$a-name" bash -c "grep -q '^name: $a\$' '$HERE/agents/$a.md'"
 done
 T "settings:no-attribution" bash -c "jq -e '.attribution.commit == \"\" and .attribution.pr == \"\"' '$HERE/settings.json'"
+T "settings:deny-rm-root-exact" bash -c "jq -e '.permissions.deny | index(\"Bash(rm -rf /)\") != null and index(\"Bash(rm -rf /*)\") == null' '$HERE/settings.json'"
 T "license:gplv2-present" bash -c "grep -q 'GNU GENERAL PUBLIC LICENSE' '$HERE/LICENSE' && grep -q 'Version 2, June 1991' '$HERE/LICENSE'"
 T "license:readme-states-gplv2" grep -q "GNU General Public License" "$HERE/README.md"
 T "readme:documents-baseline" grep -q "baseline" "$HERE/README.md"
@@ -170,6 +171,19 @@ guard_is "rm -rf $FX/plain; rm -f x"             deny  "rm-first-of-two"
 guard_is 'git rm -r --cached keep'               allow "git-rm-is-not-rm"       "$FX/repo"
 guard_is 'ssh host rm -rf ~/old-dir'             deny  "rm-remote-home"
 guard_is 'ssh host rm -rf /tmp/scratch'          allow "rm-remote-tmp"
+# 10/21/2026: settings.json denies only the exact `rm -rf /` (the old `rm -rf /*`
+# rule was a prefix wildcard that refused every absolute-path delete). These
+# cases are what the narrowed static rule used to catch; the guard must hold them.
+guard_is 'rm -rf /*'                             deny  "rm-root-glob"
+guard_is 'rm -rf / --no-preserve-root'           deny  "rm-root-no-preserve"
+guard_is "rm -rf $HOME"                          deny  "rm-home-abs"
+guard_is 'rm -rf $HOME/dev'                      deny  "rm-home-subdir-var"
+guard_is "rm -rf $HOME/dev"                      deny  "rm-home-subdir-abs"
+guard_is 'rm -rf /usr'                           deny  "rm-abs-usr"
+guard_is 'rm -rf /System'                        deny  "rm-abs-system"
+guard_is 'sudo rm -rf /var'                      deny  "rm-sudo-var"
+guard_is "ssh host 'rm -rf /'"                   deny  "rm-remote-root-quoted"
+guard_is 'ssh host rm -rf /'                     deny  "rm-remote-root"
 guard_is 'find . -name "*.py" -delete'           deny  "find-delete-no-git"     "$FX/plain"
 guard_is 'find . -exec rm {} \;'                 deny  "find-exec-rm-no-git"    "$FX/plain"
 guard_is 'find . -name "*.pyc" -delete'          allow "find-delete-clean"      "$FX/wt"
