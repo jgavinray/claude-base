@@ -37,10 +37,12 @@ T "rules:global-under-40-lines" bash -c "[ \$(wc -l < '$HERE/CLAUDE.md') -lt 40 
 
 # ---- pretool-guard -----------------------------------------------------------
 G="$HERE/hooks/pretool-guard.sh"
-guard() { printf '{"tool_input":{"command":%s}}' "$(jq -Rn --arg c "$1" '$c')" | "$G"; }
-guard_is() { # cmd, expected decision, label
+# guard CMD [CWD]: deletes and git discards are decided from what is on disk
+# under CWD, so cases that depend on it run against the fixture below.
+guard() { jq -n --arg c "$1" --arg w "${2:-$PWD}" '{tool_input:{command:$c}, cwd:$w}' | "$G"; }
+guard_is() { # cmd, expected decision, label, [cwd]
   local out d
-  out=$(guard "$1")
+  out=$(guard "$1" "${4:-}")
   # No output at all is the allow path — the hook stays silent and the tool runs.
   if [ -z "$out" ]; then
     d="allow"
@@ -49,6 +51,22 @@ guard_is() { # cmd, expected decision, label
   fi
   if [ "$d" = "$2" ]; then ok "guard:$2:$3"; else bad "guard:$2:$3" "got '$d'"; fi
 }
+
+# Fixture outside the temp dirs (always deletable) and with no build/cache name
+# in its path: a git repo holding clean, modified, untracked and ignored files,
+# a clean worktree of it, and a plain directory with no git at all.
+FX="$HOME/.claude-base-guardtest-$$"
+mkdir -p "$FX/repo/keep" "$FX/repo/dirty" "$FX/repo/cfg" "$FX/repo/client/node_modules" "$FX/plain/src"
+(
+  cd "$FX/repo" && git init -q && printf 'node_modules/\n.env\n' > .gitignore &&
+  echo a > keep/a && echo b > dirty/b && echo c > cfg/c && echo d > client/d &&
+  echo x > client/node_modules/x && git add -A &&
+  git -c commit.gpgsign=false -c user.email=t@example.invalid -c user.name=t commit -qm init &&
+  echo changed > dirty/b && mkdir new && echo n > new/n && echo secret > cfg/.env &&
+  git worktree add -q "$FX/wt" -b wtb
+) >/dev/null 2>&1
+echo p > "$FX/plain/src/p"
+
 guard_is 'rm -rf /'                              deny  "rm-rf-root"
 guard_is 'rm  -r  -f  /'                         deny  "rm-split-flags"
 guard_is 'rm -rf "/"'                            deny  "rm-quoted"
@@ -65,27 +83,66 @@ guard_is 'aws s3 rb s3://bucket'                 deny  "s3-rb"
 guard_is 'az group delete -n rg'                 deny  "az-group"
 guard_is 'git push --force origin main'          deny  "force-push"
 guard_is 'DROP DATABASE prod;'                   deny  "drop-db"
+guard_is 'sudo reboot'                           deny  "reboot"
+guard_is 'ssh host sudo shutdown -h now'         deny  "remote-shutdown"
 guard_is 'git push --force-with-lease origin hf' allow "force-with-lease-ok"
 guard_is 'kubectl delete pod nginx-1'            ask   "kubectl-pod"
 guard_is 'terraform apply'                       ask   "tf-apply"
-guard_is 'git reset --hard HEAD~1'               ask   "git-reset"
-guard_is 'docker system prune -f'                ask   "docker-prune"
 guard_is 'npm publish'                           ask   "npm-publish"
-# Recursive delete: allowlist semantics. The textbook `rm -rf /` is not the case
-# that happens; wiping a project directory is. Every line below was `allow` under
-# the original denylist.
+# 10/20/2026: git discards and prunes no longer ask. Each is decided from the
+# repo's state, with a reason the agent can act on, so the owner is not pulled in.
+guard_is "git -C $FX/repo reset --hard HEAD~1"   deny  "git-reset-dirty"
+guard_is "git -C $FX/wt reset --hard"            allow "git-reset-clean"
+guard_is "git -C $FX/repo stash -u && git -C $FX/repo reset --hard" allow "git-reset-after-stash"
+guard_is "git -C $FX/repo clean -fd"             deny  "git-clean-untracked"
+guard_is "git -C $FX/wt clean -fdx"              allow "git-clean-clean"
+guard_is 'git checkout .'                        deny  "git-checkout-dot-dirty" "$FX/repo"
+guard_is 'git branch -D old-feature'             allow "git-branch-D-reflog"
+guard_is 'docker system prune -f'                allow "docker-prune-rebuildable"
+guard_is 'docker system prune -a -f'             deny  "docker-prune-all-images"
+guard_is 'docker volume prune'                   deny  "docker-volume-prune"
+# Recursive delete. The textbook `rm -rf /` is not the case that happens;
+# wiping uncommitted work is. 10/20/2026: decided from disk and git, never asked.
 guard_is 'rm -rf ~'                              deny  "rm-home-bare"
 guard_is 'rm -rf *'                              deny  "rm-glob-all"
 guard_is 'rm -rf .'                              deny  "rm-dot"
 guard_is 'rm -rf ..'                             deny  "rm-dotdot"
-guard_is 'rm -rf ~/dev/ai-harness'               deny  "rm-under-home"
-guard_is 'rm -rf $HOME/dev'                      deny  "rm-home-subdir"
-guard_is 'rm -rf /Users/jgavinray/dev/catapult'  deny  "rm-abs-project"
+guard_is "rm -rf $FX/repo"                       deny  "rm-whole-repo"
+guard_is "rm -rf $FX/plain"                      deny  "rm-abs-no-git"
 guard_is 'rm -r --recursive /etc'                deny  "rm-abs-etc"
-guard_is 'rm -rf ./src'                          ask   "rm-source-dir"
-guard_is 'rm -rf mypackage'                      ask   "rm-unknown-dir"
-guard_is 'find . -name "*.py" -delete'           ask   "find-delete"
-guard_is 'find . -exec rm {} \;'                 ask   "find-exec-rm"
+guard_is 'rm -rf ./src'                          deny  "rm-src-no-git"          "$FX/plain"
+guard_is 'rm -rf keep'                           allow "rm-clean-tracked"       "$FX/repo"
+guard_is 'rm -rf dirty'                          deny  "rm-modified"            "$FX/repo"
+guard_is 'rm -rf new'                            deny  "rm-untracked"           "$FX/repo"
+guard_is 'rm -rf cfg'                            deny  "rm-ignored-secret"      "$FX/repo"
+guard_is 'rm -rf client'                         allow "rm-only-ignored-build"  "$FX/repo"
+guard_is 'rm -rf ../wt'                          allow "rm-clean-worktree"      "$FX/repo"
+guard_is 'rm -rf not-there'                      allow "rm-nonexistent"         "$FX/repo"
+guard_is "cd $FX/repo && rm -rf new"             deny  "rm-after-cd"
+guard_is "rm -rf $FX/repo/keep/*"                allow "rm-glob-clean"
+guard_is "rm -rf $FX/plain/*"                    deny  "rm-glob-no-git"
+guard_is 'rm -rf $UNSET_VAR'                     deny  "rm-unresolved-var"
+guard_is "rm -rf /tmp/..$FX"                     deny  "rm-dotdot-escape"
+guard_is "rm -rf $FX/plain; rm -f x"             deny  "rm-first-of-two"
+guard_is 'git rm -r --cached keep'               allow "git-rm-is-not-rm"       "$FX/repo"
+guard_is 'ssh host rm -rf ~/old-dir'             deny  "rm-remote-home"
+guard_is 'ssh host rm -rf /tmp/scratch'          allow "rm-remote-tmp"
+guard_is 'find . -name "*.py" -delete'           deny  "find-delete-no-git"     "$FX/plain"
+guard_is 'find . -exec rm {} \;'                 deny  "find-exec-rm-no-git"    "$FX/plain"
+guard_is 'find . -name "*.pyc" -delete'          allow "find-delete-clean"      "$FX/wt"
+guard_is 'find /tmp/x -name "*.o" -delete'       allow "find-delete-tmp"
+# False positives that prompted the owner on 10/20/2026.
+guard_is "$(printf 'rm -rf /tmp/x\nls src')"     allow "rm-newline-ends-command" "$FX/plain"
+guard_is 'S=/private/tmp/x; rm -rf $S/wt; ls'    allow "rm-resolved-var"
+guard_is 'rm -rf client/node_modules'            allow "rm-nested-node-modules"
+guard_is 'rm -rf client/dist'                    allow "rm-nested-dist"
+guard_is 'rm -rf /tmp/a 2>/dev/null; ls'         allow "rm-redirect"
+guard_is 'grep -rn reboot /var/log/syslog'       allow "grep-reboot-is-search"
+guard_is "$(printf "git commit -F - <<'EOF'\nfix: git reset --hard handling\nEOF")" allow "heredoc-message-is-data" "$FX/repo"
+guard_is 'git commit -m "note: git reset --hard is gated"' allow "message-arg-is-data"   "$FX/repo"
+guard_is "$(printf "cat > notes.txt <<'EOF'\nrm -rf /\nEOF")" allow "heredoc-file-is-data"
+guard_is "$(printf "bash <<'EOF'\nrm -rf $FX/plain\nEOF")"   deny  "heredoc-to-shell-runs"
+guard_is "ssh host git -C /srv/app reset --hard"   deny  "remote-reset"
 guard_is 'rm -rf node_modules'                   allow "rm-node-modules"
 guard_is 'rm -rf ./build'                        allow "rm-build"
 guard_is 'rm -rf target/debug'                   allow "rm-target"
@@ -97,8 +154,8 @@ guard_is 'rm -f config.json'                     allow "rm-single-file"
 guard_is 'ls -la'                                allow "ls"
 guard_is 'kubectl get pods -A'                   allow "kubectl-get"
 guard_is 'git status'                            allow "git-status"
-guard_is 'rm -rf ./build'                        allow "rm-local-build"
 guard_is 'pytest -q'                             allow "pytest"
+rm -rf "$FX"
 
 # ---- post-edit-check ---------------------------------------------------------
 P="$HERE/hooks/post-edit-check.sh"
