@@ -45,9 +45,59 @@ CMD=$(printf '%s' "$CMD" | perl -ne '
   print')
 
 # Normalize: join backslash-continued lines, let every other newline end a
-# command the way `;` does, collapse whitespace and strip quotes, so
-# `rm  -r  -f  /` and `rm -rf "/"` match the same pattern as `rm -rf /`.
-N=$(printf '%s' "$CMD" | perl -0777 -pe 's/\\\n/ /g; s/\n/ ; /g' | tr -s '[:space:]' ' ' | tr -d "'\"")
+# command the way `;` does, and collapse whitespace, so `rm  -r  -f  /` and
+# `rm -rf "/"` match the same pattern as `rm -rf /`.
+#
+# Quotes are not simply stripped: that makes `echo "git push -f origin main"`
+# read as a push. A quoted string is DATA unless it is code — the argument of
+# `bash -c`/`sh -c`/`zsh -c`/`dash -c` (also behind sudo), the remote command
+# of `ssh HOST`, or an `eval` argument. Data holding whitespace is replaced by
+# a placeholder so its words cannot be read as a command; code is unwrapped so
+# it is still checked. A quoted single word stays, so `git push "-f" origin
+# main` is still a force push.
+N=$(printf '%s' "$CMD" | perl -0777 -pe 's/\\\n/ /g; s/\n/ ; /g' | tr -s '[:space:]' ' ' | perl -0777 -e '
+  my $s = do { local $/; <STDIN> };
+  $s = "" unless defined $s;
+  my $out = "";
+  my $cur = "";
+  my $n = length $s;
+  my $i = 0;
+  while ($i < $n) {
+    my $c = substr($s, $i, 1);
+    if ($c eq chr(39) || $c eq chr(34)) {
+      my $q = $c;
+      my $j = $i + 1;
+      my $body = "";
+      while ($j < $n) {
+        my $d = substr($s, $j, 1);
+        if ($q eq chr(34) && $d eq "\\" && $j + 1 < $n) {
+          $body .= substr($s, $j, 2);
+          $j += 2;
+          next;
+        }
+        last if $d eq $q;
+        $body .= $d;
+        $j++;
+      }
+      my $code = ($cur =~ /^\s*(?:sudo\s+)?(?:bash|sh|zsh|dash|ksh)\s+(?:-\S+\s+)*-c\s*$/)
+              || ($cur =~ /^\s*(?:sudo\s+)?ssh\s+(?:-\S+\s+)*\S+\s+$/)
+              || ($cur =~ /^\s*(?:sudo\s+)?eval\s+$/);
+      if ($code || $body !~ /\s/) {
+        $out .= $body;
+        $cur .= $body;
+      } else {
+        $out .= "__Q__";
+        $cur .= "__Q__";
+      }
+      $i = $j + 1;
+      next;
+    }
+    $out .= $c;
+    if ($c =~ /[;&|(){}]/) { $cur = "" } else { $cur .= $c }
+    $i++;
+  }
+  print $out;
+' | tr -d "'\"")
 
 # Command position: start of a command, or after sudo, ssh HOST, bash -c and
 # the like. Used where a word could also appear in a message or an argument
@@ -78,6 +128,10 @@ decide() { # decision, reason
 }
 
 m() { printf '%s' "$N" | grep -qiE "$1"; }
+
+# Case-sensitive match, for git flags where `-S` and `-s` mean different things:
+# `-S` is `--staged`, `-s` is `--source=<commit>`, `-W` is `--worktree`.
+mc() { printf '%s' "$N" | grep -qE "$1"; }
 
 # Build output, caches and vendored deps: safe to blow away.
 EPH='node_modules|build|dist|out|target|coverage|htmlcov|\.next|\.nuxt|\.svelte-kit|__pycache__|\.pytest_cache|\.mypy_cache|\.ruff_cache|\.tox|\.venv|venv|env|\.cache|tmp|temp|[^/]*\.egg-info'
@@ -371,13 +425,17 @@ m "${CP}git +(-C +[^ ]+ +)?checkout +(-- +)?\.( |;|$)"        && discard_check t
 m "${CP}git +(-C +[^ ]+ +)?checkout\b[^;&|]* +(-[a-zA-Z]*f\b|--force\b)" && discard_check tracked "git checkout --force"
 m "${CP}git +(-C +[^ ]+ +)?switch\b[^;&|]* +(-[a-zA-Z]*f\b|--force\b|--discard-changes\b)" && discard_check tracked "git switch --discard-changes"
 if m "${CP}git +(-C +[^ ]+ +)?restore\b[^;&|]* +\.( |;|$)"; then
-  # Worktree is touched unless `--staged` alone is given.
-  if m "${CP}git +(-C +[^ ]+ +)?restore\b[^;&|]* +(-W\b|--worktree\b)" \
-     || ! m "${CP}git +(-C +[^ ]+ +)?restore\b[^;&|]* +(-S\b|--staged\b)"; then
+  # Worktree is touched unless `--staged` alone is given. `-S` and `-s` are
+  # different flags (`--staged` vs `--source`), so this test is case-sensitive;
+  # `git restore -s HEAD .` discards the worktree and must be checked.
+  if mc "${CP}git +(-C +[^ ]+ +)?restore\b[^;&|]* +(-W\b|--worktree\b)" \
+     || ! mc "${CP}git +(-C +[^ ]+ +)?restore\b[^;&|]* +(-S\b|--staged\b)"; then
     discard_check tracked "git restore ."
   fi
 fi
-if m "${CP}git +(-C +[^ ]+ +)?clean +(-[a-zA-Z]*f|--force\b)"; then
+# Force counts wherever it stands among clean's flags (`-d --force`, `-dx -f`),
+# not only as the first flag.
+if m "${CP}git +(-C +[^ ]+ +)?clean\b[^;&|]*( +-[A-Za-z]*f[A-Za-z]*\b| +--force\b)"; then
   if m "${CP}git +(-C +[^ ]+ +)?clean +-[a-zA-Z]*[xX]"; then discard_check all "git clean -x"
   else discard_check untracked "git clean"; fi
 fi
