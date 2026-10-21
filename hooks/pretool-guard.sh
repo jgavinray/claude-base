@@ -71,6 +71,9 @@ decide() { # decision, reason
 }
 
 m() { printf '%s' "$N" | grep -qiE "$1"; }
+# Case-sensitive m, for flags where case carries meaning: git restore's -s is
+# --source, and a case-insensitive -S would mistake it for --staged.
+mm() { printf '%s' "$N" | grep -qE "$1"; }
 
 # Build output, caches and vendored deps: safe to blow away.
 EPH='node_modules|build|dist|out|target|coverage|htmlcov|\.next|\.nuxt|\.svelte-kit|__pycache__|\.pytest_cache|\.mypy_cache|\.ruff_cache|\.tox|\.venv|venv|env|\.cache|tmp|temp|[^/]*\.egg-info'
@@ -351,8 +354,22 @@ discard_check() { # what is lost (tracked|untracked|all), what the command is
 
 m "${CP}git +(-C +[^ ]+ +)?reset\b[^;&|]*--hard"              && discard_check tracked "git reset --hard"
 m "${CP}git +(-C +[^ ]+ +)?checkout +(-- +)?\.( |;|$)"        && discard_check tracked "git checkout ."
-if m "${CP}git +(-C +[^ ]+ +)?clean +-[a-zA-Z]*f"; then
-  if m "${CP}git +(-C +[^ ]+ +)?clean +-[a-zA-Z]*[xX]"; then discard_check all "git clean -x"
+m "${CP}git +(-C +[^ ]+ +)?checkout\b[^;&|]* +(-[a-zA-Z]*f|--force\b)" && discard_check tracked "git checkout -f"
+m "${CP}git +(-C +[^ ]+ +)?switch\b[^;&|]* +(-[a-zA-Z]*f|--force\b|--discard-changes\b)" && discard_check tracked "git switch -f"
+# `git restore .` throws away worktree edits of tracked files. `--staged`
+# without `--worktree` only unstages, so nothing is lost there.
+if m "${CP}git +(-C +[^ ]+ +)?restore\b[^;&|]* +\./?([ ;&|)]|$)"; then
+  if ! mm "${CP}git +(-C +[^ ]+ +)?restore\b[^;&|]* +(-W|--worktree)\b" \
+     && mm "${CP}git +(-C +[^ ]+ +)?restore\b[^;&|]* +(-S|--staged)\b"; then
+    : # staged-only restore: allowed
+  else
+    discard_check tracked "git restore ."
+  fi
+fi
+# Flags come in any order (-d --force, --force -x), so skip whole flag tokens
+# before looking for the one that decides.
+if m "${CP}git +(-C +[^ ]+ +)?clean +(-?[a-zA-Z-]+(=[^ ;&|]+)? +)*(-[a-zA-Z]*f|--force\b)"; then
+  if m "${CP}git +(-C +[^ ]+ +)?clean +(-?[a-zA-Z-]+(=[^ ;&|]+)? +)*-[a-zA-Z]*[xX]"; then discard_check all "git clean -x"
   else discard_check untracked "git clean"; fi
 fi
 
