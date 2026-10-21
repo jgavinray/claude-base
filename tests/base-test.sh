@@ -92,6 +92,21 @@ guard_is "curl -d '{\"q\":\"git push --force origin main\"}' http://x" allow "fo
 guard_is 'kubectl delete pod nginx-1'            ask   "kubectl-pod"
 guard_is 'terraform apply'                       ask   "tf-apply"
 guard_is 'npm publish'                           ask   "npm-publish"
+# Global flags before the subcommand decide the same as the bare form.
+guard_is 'terraform -chdir=infra destroy'        deny  "tf-destroy-chdir"
+guard_is 'terraform -chdir=infra apply'          ask   "tf-apply-chdir"
+guard_is 'helm -n prod uninstall web'            deny  "helm-uninstall-n"
+guard_is 'aws --profile prod s3 rb s3://bucket'  deny  "s3-rb-profile"
+guard_is 'aws --region us-east-1 s3 rm s3://b --recursive' deny "s3-rm-recursive-region"
+guard_is 'argocd --server x app delete foo'      deny  "argocd-delete-server"
+guard_is 'flux --namespace x uninstall'          deny  "flux-uninstall-ns"
+guard_is 'az --subscription x group delete -n rg' deny "az-group-subscription"
+guard_is 'cargo --locked publish'                ask   "cargo-publish-locked"
+guard_is 'npm --registry https://example.invalid publish' ask "npm-publish-registry"
+guard_is 'terraform -chdir=infra plan'           allow "tf-plan-chdir"
+guard_is 'helm -n prod list'                     allow "helm-list-n"
+guard_is 'aws --profile prod s3 rm s3://bucket/one-key' allow "s3-rm-one-key"
+guard_is 'cargo --locked build'                  allow "cargo-build-locked"
 # 10/20/2026: git discards and prunes no longer ask. Each is decided from the
 # repo's state, with a reason the agent can act on, so the owner is not pulled in.
 guard_is "git -C $FX/repo reset --hard HEAD~1"   deny  "git-reset-dirty"
