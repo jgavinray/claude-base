@@ -351,7 +351,19 @@ discard_check() { # what is lost (tracked|untracked|all), what the command is
 
 m "${CP}git +(-C +[^ ]+ +)?reset\b[^;&|]*--hard"              && discard_check tracked "git reset --hard"
 m "${CP}git +(-C +[^ ]+ +)?checkout +(-- +)?\.( |;|$)"        && discard_check tracked "git checkout ."
-if m "${CP}git +(-C +[^ ]+ +)?clean +-[a-zA-Z]*f"; then
+# Same discard, different spelling: `checkout -f`, `switch -f`/`--discard-changes`
+# and `restore .` all throw the worktree away without saying `reset --hard`.
+# `restore --staged .` only unstages, so it stays allowed.
+m "${CP}git +(-C +[^ ]+ +)?checkout\b[^;&|]* +(-[a-zA-Z]*f\b|--force\b)" && discard_check tracked "git checkout --force"
+m "${CP}git +(-C +[^ ]+ +)?switch\b[^;&|]* +(-[a-zA-Z]*f\b|--force\b|--discard-changes\b)" && discard_check tracked "git switch --discard-changes"
+if m "${CP}git +(-C +[^ ]+ +)?restore\b[^;&|]* +\.( |;|$)"; then
+  # Worktree is touched unless `--staged` alone is given.
+  if m "${CP}git +(-C +[^ ]+ +)?restore\b[^;&|]* +(-W\b|--worktree\b)" \
+     || ! m "${CP}git +(-C +[^ ]+ +)?restore\b[^;&|]* +(-S\b|--staged\b)"; then
+    discard_check tracked "git restore ."
+  fi
+fi
+if m "${CP}git +(-C +[^ ]+ +)?clean +(-[a-zA-Z]*f|--force\b)"; then
   if m "${CP}git +(-C +[^ ]+ +)?clean +-[a-zA-Z]*[xX]"; then discard_check all "git clean -x"
   else discard_check untracked "git clean"; fi
 fi
