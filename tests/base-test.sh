@@ -300,6 +300,29 @@ hg_is "ssh jgavinray@192.168.0.44 'rm -rf /home/azeroth/ac-build /home/azeroth/a
 hg_is "ssh jgavinray@192.168.0.44 'rm -rf /home/azeroth/ac-build \$X'"    deny  "hostrm-variable-target"
 rm -f "$FH/.claude/guard-ephemeral"
 hg_is "ssh jgavinray@192.168.0.44 'rm -rf /home/azeroth/ac-build'"        deny  "hostrm-no-list-file"
+# 10/21/2026: a regenerable NAME (dist, venv, build, ...) is not enough. Locally
+# nothing may be running in it and it may hold no *.conf or etc/; over ssh the
+# name alone allows nothing (a live AzerothCore env/dist was one rm away).
+mkdir -p "$FX/live/dist/bin" "$FX/confdist/dist/etc" "$FX/plainbuild/build/out" "$FX/venvlive/venv/bin"
+echo x > "$FX/confdist/dist/etc/x.conf"; echo y > "$FX/plainbuild/build/out/o.o"
+(cd "$FX/live/dist/bin" && exec /bin/sleep 300) & LIVE1=$!
+(cd "$FX/venvlive/venv" && exec /bin/sleep 300) & LIVE2=$!
+sleep 0.5
+guard_is "rm -rf $FX/live/dist"                  deny  "regen-dist-with-running-process"
+guard_is "rm -rf $FX/venvlive/venv"              deny  "regen-venv-with-running-cwd"
+guard_is "rm -rf $FX/confdist/dist"              deny  "regen-dist-with-etc-conf"
+guard_is "rm -rf $FX/plainbuild/build"           allow "regen-plain-build-dir"
+guard_is "cd $FX/plainbuild && rm -rf build"     allow "regen-plain-build-dir-relative"
+kill "$LIVE1" "$LIVE2" 2>/dev/null; wait "$LIVE1" "$LIVE2" 2>/dev/null
+guard_is "rm -rf $FX/live/dist"                  allow "regen-dist-after-process-exits"
+guard_is "ssh jgavinray@192.168.0.44 'rm -rf /home/azeroth/azerothcore-wotlk/env/dist'" deny "regen-remote-env-dist"
+guard_is "ssh hyper01 'rm -rf node_modules'"     deny  "regen-remote-relative-node_modules"
+guard_is "ssh hyper01 'rm -rf /tmp/proj/build'"  allow "regen-remote-tmp-build"
+printf 'host:192.168.0.44:/home/azeroth/azerothcore-wotlk/env/dist\n' > "$FH/.claude/guard-ephemeral"
+hg_is "ssh jgavinray@192.168.0.44 'rm -rf /home/azeroth/azerothcore-wotlk/env/dist'" allow "regen-remote-env-dist-listed"
+hg_is "ssh jgavinray@192.168.0.44 'sudo rm -rf /home/azeroth/azerothcore-wotlk/env/dist/etc'" allow "regen-remote-env-dist-listed-below"
+hg_is "ssh jgavinray@192.168.0.43 'rm -rf /home/azeroth/azerothcore-wotlk/env/dist'" deny "regen-remote-listed-other-host"
+rm -f "$FH/.claude/guard-ephemeral"
 guard_is 'rm -f server.log'                      allow "rm-nonrecursive-with-r-in-name"
 guard_is 'rm -f config.json'                     allow "rm-single-file"
 guard_is 'ls -la'                                allow "ls"

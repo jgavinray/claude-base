@@ -245,8 +245,26 @@ remote_listed() { # host, path as written
   return 1
 }
 
+# Build/cache output is deletable when nothing live is in it.
+regen_check() { # cwd, path as written; decides deny itself, returns when fine
+  local a hit
+  a=$(to_abs "$1" "$2")
+  [ "$a" = "?" ] && return 0
+  [ -e "$a" ] || return 0
+  in_scratch "$a" && return 0
+  a=$(physpath "$a")
+  if lsof -w -d cwd,txt -Fn 2>/dev/null | awk -v a="$a" '/^n/ { p = substr($0, 2); if (p == a || index(p, a "/") == 1) { f = 1; exit } } END { exit !f }'; then
+    decide deny "pretool-guard: '$2' has a running process with its program or working directory inside it, so it is not just build output (a live install?). Stop that process the proper way first, or leave it for the owner."
+  fi
+  hit=$(find "$a" -maxdepth 3 \( -name node_modules -o -name site-packages -o -name .git \) -prune -o \( -name '*.conf' -o -type d -name etc \) -print -quit 2>/dev/null)
+  if [ -n "$hit" ]; then
+    decide deny "pretool-guard: '$2' looks like build output but holds configuration ($hit). Those files may be the owner's and cannot be regenerated. Move them out, or leave it for the owner."
+  fi
+  return 0
+}
+
 check_target() { # cwd, target as written, mode (rm|find), [ssh host]
-  local c="$1" raw="$2" mode="$3" host="${4:--}" w a base glob=0
+  local c="$1" raw="$2" mode="$3" host="${4:--}" w a base glob=0 eph
   w=$(resolve_word "$raw")
 
   # Unrecoverable: filesystem root, home itself, or the whole current tree.
@@ -270,18 +288,28 @@ check_target() { # cwd, target as written, mode (rm|find), [ssh host]
   esac
 
   # Build/cache output: by its last name when absolute, by any part when relative.
+  # A regenerable name is not enough (10/21/2026): `env/dist` under a live
+  # AzerothCore install holds the running binaries and the owner's configs.
+  # Locally the directory must have no running process in it and no *.conf or
+  # etc/ below it; on another machine the guard cannot look, so a name alone
+  # allows nothing there (a `host:` line in guard-ephemeral or /tmp does).
   base=${w%/}
+  eph=0
   case "$base" in
-    /*|'~'/*|'$HOME'/*) printf '%s' "${base##*/}" | grep -qE "^($EPH)$" && return 0 ;;
-    *) printf '%s' "$base" | grep -qE "(^|/)($EPH)(/|$)" && return 0 ;;
+    /*|'~'/*|'$HOME'/*) printf '%s' "${base##*/}" | grep -qE "^($EPH)$" && eph=1 ;;
+    *) printf '%s' "$base" | grep -qE "(^|/)($EPH)(/|$)" && eph=1 ;;
   esac
+  if [ "$eph" -eq 1 ] && [ "$REMOTE" -eq 0 ]; then
+    regen_check "$c" "$w"
+    return 0
+  fi
 
   # Another machine (ssh): only its temp dirs are allowed; nothing there can be
   # checked against git from here.
   if [ "$REMOTE" -eq 1 ]; then
     case "$w" in /tmp/?*|/var/tmp/?*|/private/tmp/?*) return 0 ;; esac
     remote_listed "$host" "$w" && return 0
-    decide deny "pretool-guard: '$w' is on another machine, so it cannot be checked against git there. Move it under /tmp on that machine first, or leave it for the owner."
+    decide deny "pretool-guard: '$w' is on another machine, so it cannot be checked (not against git, not for running processes, not for configs). Even a build-output name like dist or venv can be a live install there. Move it under /tmp on that machine first, or leave it for the owner."
   fi
 
   a=$(to_abs "$c" "$w")
