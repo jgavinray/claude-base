@@ -218,8 +218,35 @@ recoverable() { # absolute path, path as written, mode (rm|find)
   decide deny "pretool-guard: '$w' holds files git cannot bring back ($(printf '%s' "$left" | tr '\n' ' ')). Commit them first, or move it to the Trash (mv $w ~/.Trash/)."
 }
 
-check_target() { # cwd, target as written, mode (rm|find)
-  local c="$1" raw="$2" mode="$3" w a base glob=0
+# A path on another machine that ~/.claude/guard-ephemeral lists for that host
+# as a line `host:<ip-or-alias>:<absolute path>` (10/21/2026): the path and
+# anything under it may be deleted over ssh. The host must match the word after
+# ssh exactly (an alias does not stand for its IP). Lines for `/`, a top-level
+# directory, or a home directory are ignored, as are `..` escapes.
+remote_listed() { # host, path as written
+  local host="$1" w="$2" f line h p
+  [ -n "$host" ] && [ "$host" != - ] || return 1
+  case "$w" in /*) ;; *) return 1 ;; esac
+  w=$(normpath "$w")
+  f=${GUARD_EPHEMERAL_FILE:-$HOME/.claude/guard-ephemeral}
+  [ -r "$f" ] || return 1
+  while IFS= read -r line || [ -n "$line" ]; do
+    line=${line%%#*}; line=${line#"${line%%[![:space:]]*}"}; line=${line%"${line##*[![:space:]]}"}
+    case "$line" in host:*) ;; *) continue ;; esac
+    line=${line#host:}; h=${line%%:*}; p=${line#*:}
+    [ "$h" = "$host" ] || continue
+    case "$p" in /*) ;; *) continue ;; esac
+    p=$(normpath "$p")
+    [ "$p" = / ] && continue
+    [[ "$p" =~ ^/[^/]+$ ]] && continue
+    [[ "$p" =~ ^/(home|Users|root)/[^/]+$ ]] && continue
+    covers "$p" "$w" && return 0
+  done < "$f"
+  return 1
+}
+
+check_target() { # cwd, target as written, mode (rm|find), [ssh host]
+  local c="$1" raw="$2" mode="$3" host="${4:--}" w a base glob=0
   w=$(resolve_word "$raw")
 
   # Unrecoverable: filesystem root, home itself, or the whole current tree.
@@ -253,6 +280,7 @@ check_target() { # cwd, target as written, mode (rm|find)
   # checked against git from here.
   if [ "$REMOTE" -eq 1 ]; then
     case "$w" in /tmp/?*|/var/tmp/?*|/private/tmp/?*) return 0 ;; esac
+    remote_listed "$host" "$w" && return 0
     decide deny "pretool-guard: '$w' is on another machine, so it cannot be checked against git there. Move it under /tmp on that machine first, or leave it for the owner."
   fi
 
@@ -285,7 +313,7 @@ check_target() { # cwd, target as written, mode (rm|find)
 TAB='	'
 NL='
 '
-REMOTE=0; ECWD=$CWD
+REMOTE=0; RHOST=""; SSHSTATE=0; ECWD=$CWD
 RM=0; REC=0; GROUP=""; ENTRIES=""
 FIND=0; FIND_ROOT=.; FIND_CWD=$CWD
 EXPECT=""; SKIPNEXT=0; PREV=""
@@ -293,7 +321,7 @@ EXPECT=""; SKIPNEXT=0; PREV=""
 end_group() {
   local t
   if [ "$RM" -eq 1 ] && [ "$REC" -eq 1 ]; then
-    for t in $GROUP; do ENTRIES="$ENTRIES$ECWD$TAB$t$NL"; done
+    for t in $GROUP; do ENTRIES="$ENTRIES$ECWD$TAB$t$TAB${RHOST:--}$NL"; done
   fi
   RM=0; REC=0; GROUP=""
 }
@@ -314,7 +342,19 @@ word() {
     case "$w" in -*|'!'|'('|'\(') ;; *) FIND_ROOT=$w; return ;; esac
   fi
   if [ "$SKIPNEXT" -eq 1 ]; then SKIPNEXT=0; return; fi
-  case "$w" in ssh|*/ssh) REMOTE=1 ;; esac
+  # After `ssh`: skip its options (and their values) and take the first plain
+  # word as the host, with any user@ cut off. Used by the host: lines of
+  # ~/.claude/guard-ephemeral.
+  if [ "$SSHSTATE" -eq 2 ]; then SSHSTATE=1; return; fi
+  if [ "$SSHSTATE" -eq 1 ]; then
+    case "$w" in
+      -[bcDEeFIiJLlmOopQRSWw]) SSHSTATE=2 ;;
+      -*) ;;
+      *) RHOST=${w##*@}; SSHSTATE=0 ;;
+    esac
+    return
+  fi
+  case "$w" in ssh|*/ssh) REMOTE=1; SSHSTATE=1; RHOST="" ;; esac
   if [ "$RM" -eq 0 ]; then
     case "$w" in
       cd) EXPECT=cd; return ;;
@@ -353,8 +393,8 @@ done
 end_group
 
 if [ -n "$ENTRIES" ]; then
-  while IFS="$TAB" read -r c t; do
-    [ -n "$t" ] && check_target "$c" "$t" rm
+  while IFS="$TAB" read -r c t h; do
+    [ -n "$t" ] && check_target "$c" "$t" rm "$h"
   done <<EOF
 $ENTRIES
 EOF
@@ -363,7 +403,7 @@ fi
 # find -delete / -exec rm: same blast radius, different spelling. Judged by the
 # directory find starts from.
 if [ "$FIND" -eq 1 ] && m '(-delete|-exec(dir)? +rm)'; then
-  check_target "$FIND_CWD" "$FIND_ROOT" find
+  check_target "$FIND_CWD" "$FIND_ROOT" find "${RHOST:--}"
 fi
 
 # ------------------------------------------------------------------ DENY tier
@@ -394,7 +434,30 @@ m "az +${GF}group +delete"                      && decide deny "pretool-guard: A
 m 'gcloud +.*(projects|clusters|instances) +delete' && decide deny "pretool-guard: GCP resource deletion — blocked."
 
 # Data
-m '\b(drop +database|drop +schema|truncate +table)\b' && decide deny "pretool-guard: destructive SQL — blocked."
+m '\b(truncate +table)\b' && decide deny "pretool-guard: destructive SQL — blocked."
+
+# DROP DATABASE / DROP SCHEMA (10/21/2026): denied, except for a database the
+# session made for itself and listed in ~/.claude/guard-ephemeral as a line
+# `mysql-db:NAME`. The statement must be the whole SQL string (`-e "DROP
+# DATABASE [IF EXISTS] NAME"`, backticks allowed), with exactly the listed name:
+# no wildcard, no second statement, no unlisted name. Direct, `sudo mysql -e`
+# and over ssh all read the same way. Remove the line when the drop is done.
+mysql_drop_ok() {
+  local f=${GUARD_EPHEMERAL_FILE:-$HOME/.claude/guard-ephemeral}
+  [ -r "$f" ] || return 1
+  printf '%s' "$CMD" | perl -e '
+    my %ok; open(my $fh, "<", $ARGV[0]) or exit 1;
+    while (<$fh>) { s/#.*//; $ok{$1} = 1 if /^\s*mysql-db:\s*([A-Za-z0-9_\$]+)\s*$/ }
+    local $/; my $c = <STDIN>; $c = "" unless defined $c;
+    my $total = () = $c =~ /\bdrop\s+(?:database|schema)\b/gi;
+    my $good = 0;
+    while ($c =~ /["\x27]\s*drop\s+(?:database|schema)\s+(?:if\s+exists\s+)?\x60?([A-Za-z0-9_\$]+)\x60?\s*;?\s*(?=\\?["\x27]|$)/gi) {
+      exit 1 unless $ok{$1}; $good++ }
+    exit(($total > 0 && $good == $total) ? 0 : 1);' "$f"
+}
+if m '\b(drop +database|drop +schema)\b'; then
+  mysql_drop_ok || decide deny "pretool-guard: destructive SQL — blocked. A database you created for a test can be dropped once its name is on a line 'mysql-db:NAME' in ~/.claude/guard-ephemeral (one statement, exact name)."
+fi
 
 # Docker: volumes are data, and "every unused image" includes rollback images.
 # A plain prune only drops what can be rebuilt, so it passes.
