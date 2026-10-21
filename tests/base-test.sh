@@ -81,6 +81,12 @@ guard_is 'helm uninstall my-release'             deny  "helm-uninstall"
 guard_is 'argocd app delete my-app'              deny  "argocd-delete"
 guard_is 'aws s3 rb s3://bucket'                 deny  "s3-rb"
 guard_is 'az group delete -n rg'                 deny  "az-group"
+# 10/20/2026: a global flag between tool and subcommand decides the same way
+# as the bare form, and harmless commands with one stay allowed.
+guard_is 'terraform -chdir=infra destroy'        deny  "tf-destroy-chdir"
+guard_is 'helm -n prod uninstall web'            deny  "helm-uninstall-n"
+guard_is 'aws --profile prod s3 rb s3://bucket'  deny  "s3-rb-profile"
+guard_is 'flux --namespace x uninstall'          deny  "flux-uninstall-ns"
 guard_is 'git push --force origin main'          deny  "force-push"
 guard_is 'DROP DATABASE prod;'                   deny  "drop-db"
 guard_is 'sudo reboot'                           deny  "reboot"
@@ -92,6 +98,11 @@ guard_is "curl -d '{\"q\":\"git push --force origin main\"}' http://x" allow "fo
 guard_is 'kubectl delete pod nginx-1'            ask   "kubectl-pod"
 guard_is 'terraform apply'                       ask   "tf-apply"
 guard_is 'npm publish'                           ask   "npm-publish"
+guard_is 'terraform -chdir=infra apply'          ask   "tf-apply-chdir"
+guard_is 'cargo --locked publish'                ask   "cargo-publish-locked"
+guard_is 'terraform -chdir=infra plan'           allow "tf-plan-chdir"
+guard_is 'helm -n prod list'                     allow "helm-list-n"
+guard_is 'npm --registry x install'              allow "npm-install-registry"
 # 10/20/2026: git discards and prunes no longer ask. Each is decided from the
 # repo's state, with a reason the agent can act on, so the owner is not pulled in.
 guard_is "git -C $FX/repo reset --hard HEAD~1"   deny  "git-reset-dirty"
