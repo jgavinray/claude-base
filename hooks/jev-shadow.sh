@@ -76,9 +76,8 @@ sub shell_ok {
   my ($v, $dash_ok) = @_;
   my $inner = unq($v);
   return 0 if $inner eq "" || index($inner, "REDACTED") >= 0;
-  return 0 if $v !~ /\A'/ && $inner =~ /\A[\$<]/;
-  return 0 if !$dash_ok && $inner =~ /\A-/;
-  return 0 if $SKIP{lc $inner};
+  return 0 if $v !~ /\A'/ && $inner =~ /\A(?:\$(?!')|<)/;   # $VAR, ${VAR}, $(cmd) and redirects are not values
+  return 0 if !$dash_ok && $inner =~ /\A-/;                  # "--password --verbose": the next flag, not a value
   return 1;
 }
 
@@ -98,8 +97,12 @@ $t =~ s/(:\/\/[^\/\s:@]+:)[^@\s\/]+(@)/$1\[REDACTED:pw]$2/g;
 my $SV = q~"[^"\n]*"|'[^'\n]*'|[^\s'"`;&|<>()]+~;
 my $GAP = q~[^;&|\n()]{0,300}?~;
 my $PW = "[REDACTED:pw]";
-# env assignments: ZB_PW=..., PASS=..., DB_PASSWD=..., svc_pwd=...
-apply(qr{(?<![A-Za-z0-9\$/])((?:[A-Za-z0-9]{1,30}[_.-]){0,6}(?-i:PW|PWD|PASS|PASSWD|PASSCODE)(?:[_.-][A-Za-z0-9]{1,30}){0,4}=|(?:[A-Za-z0-9]{1,30}[_.-]){1,6}(?i:pw|pwd|pass|passwd|passcode)=)($SV)}, $PW, sub { prose_ok($_[0], 1) });
+# env assignments with a password-like NAME: ZB_PW=..., PASS=..., DB_PASSWD=..., svc_pwd=..., DBPASS=...
+# The name is the signal, so the value is masked whatever its shape (fake-value-xyz, abc-def, correct-horse-battery);
+# only a $VAR / ${VAR} reference is left. Bare PWD is the shell's working directory and is not matched.
+my $PWKW = '(?:[A-Za-z0-9]{1,30}[_.-]){0,6}';
+my $PWTAIL = '(?:[_.-][A-Za-z0-9]{1,30}){0,4}';
+apply(qr{(?<![A-Za-z0-9\$/])((?:${PWKW}(?i:pass|passwd|passcode|pw)[0-9]{0,2}|(?:[A-Za-z0-9]{1,30}[_.-]){1,6}(?i:pwd)[0-9]{0,2}|(?i:(?!(?:com|by|tres|sur|over|under)pass(?![A-Za-z]))[A-Za-z]{1,20}(?:pass|passwd|pwd|pw)))${PWTAIL}=)($SV)}, $PW, sub { shell_ok($_[0], 1) });
 # --password VALUE, --db-password VALUE, --pass VALUE, --client-secret VALUE, --token VALUE (the = form is above)
 apply(qr{(?<![A-Za-z0-9_-])((?i:--(?:[a-z0-9]+-)*(?:(?:password|passwd|passphrase|secret|token|api-?key|access-?key)(?:-(?!(?:stdin|file|env|prompt|cmd|command|helper|store|path|dir|length|policy)\b)[a-z0-9]+)*|pass|pw|pwd))(?:=|[ \t]+))($SV)}, $PW, sub { shell_ok($_[0], 0) });
 # sshpass -p VALUE (after its own flags only, so "sshpass -e ssh -p 22 host" keeps its port)
