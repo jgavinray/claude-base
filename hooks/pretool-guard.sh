@@ -315,9 +315,16 @@ m '\b(drop +database|drop +schema|truncate +table)\b' && decide deny "pretool-gu
 # A plain prune only drops what can be rebuilt, so it passes.
 m "${CP}docker +[^;&|]*(volume +prune|prune +[^;&|]*--volumes|(system|image) +prune +[^;&|]*(-a\b|--all))" && decide deny "pretool-guard: this prune removes volumes (data) or every unused image (rollback images included). Remove the specific image or volume by name instead."
 
-# Git: force-push, unless it is the safe variant
-if m "${CP}git +(-C +[^ ]+ +)?push( +[^;&|]*)? +(--force|-f)\b"; then
-  m "${CP}git +(-C +[^ ]+ +)?push +[^;&|]*--force-with-lease" || decide deny "pretool-guard: force push — blocked. Use --force-with-lease."
+# Git: force-push, unless it is the safe variant.
+# Global options before the subcommand (`-C dir`, `-c k=v`, `--no-pager`) are
+# skipped, so `git --no-pager push -f` is still read as a push. A force is
+# `--force`, a short-flag cluster holding f (`-f`, `-uf`, `-fu`), or a `+` at
+# the start of a refspec (`git push origin +main`). A name like `feat+x` has
+# the `+` mid-word and is not a forced ref.
+GITG='( +(-C +[^ ;&|]+|-c +[^ ;&|]+|--no-pager|--paginate|-p|--bare|--git-dir=[^ ;&|]*|--work-tree=[^ ;&|]*))*'
+GPUSH="${CP}git${GITG} +push\b"
+if m "${GPUSH}[^;&|]*( +-[A-Za-z]*f[A-Za-z]*\b| +\+[^ ;&|]+| +--force\b)"; then
+  m "${GPUSH}[^;&|]*--force-with-lease" || decide deny "pretool-guard: force push — blocked. Use --force-with-lease."
 fi
 
 # Git discards: allowed when there is nothing to lose or a stash comes first in
