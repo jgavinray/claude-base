@@ -37,6 +37,10 @@ T "rules:global-under-40-lines" bash -c "[ \$(wc -l < '$HERE/CLAUDE.md') -lt 40 
 
 # ---- pretool-guard -----------------------------------------------------------
 G="$HERE/hooks/pretool-guard.sh"
+# The guard sends every command to the Jev service in the background. Tests
+# must not feed it, so the kill-switch file is pointed at one that always
+# exists (/). The jev-shadow section below sets its own.
+export JEV_SHADOW_OFF_FILE=/
 # guard CMD [CWD]: deletes and git discards are decided from what is on disk
 # under CWD, so cases that depend on it run against the fixture below.
 guard() { jq -n --arg c "$1" --arg w "${2:-$PWD}" '{tool_input:{command:$c}, cwd:$w}' | "$G"; }
@@ -198,6 +202,118 @@ guard_is 'kubectl get pods -A'                   allow "kubectl-get"
 guard_is 'git status'                            allow "git-status"
 guard_is 'pytest -q'                             allow "pytest"
 rm -rf "$FX"
+
+# ---- jev shadow call (fire-and-forget; never changes a decision) -------------
+J="$HERE/hooks/jev-shadow.sh"
+redacts() { # label, input, secret-that-must-not-survive
+  local out; out=$(printf '%s' "$2" | "$J" redact)
+  if [ "${out#*"$3"}" != "$out" ]; then bad "jev-redact:$1" "secret survived"
+  elif [ "${out#*REDACTED}" = "$out" ]; then bad "jev-redact:$1" "no mask marker"
+  else ok "jev-redact:$1"; fi
+}
+redacts ghp        "export GH=ghp_$(printf 'a%.0s' $(seq 36))"                    "ghp_aaaa"
+redacts github_pat "git clone https://github_pat_$(printf 'B%.0s' $(seq 30))@x/y" "github_pat_BBBB"
+redacts hf         "huggingface-cli login --token hf_$(printf 'c%.0s' $(seq 34))" "hf_cccc"
+redacts sk         "ANTHROPIC=sk-ant-api03-$(printf 'd%.0s' $(seq 30)) claude"    "sk-ant-api03-dddd"
+redacts akia       "aws configure set aws_access_key_id AKIAABCDEFGHIJKLMNOP"     "AKIAABCDEFGHIJKLMNOP"
+redacts xox        "curl -d token=xoxb-1234567890-abcdefghij https://slack.com"   "xoxb-1234567890"
+redacts bearer     "curl -H 'Authorization: Bearer eyJhbGciOi.abcdef.ghijkl' x"   "eyJhbGciOi"
+redacts password   "mysql -u root --password=hunter2hunter2 db"                   "hunter2hunter2"
+redacts token      "TOKEN=abc123xyz789 ./run.sh"                                  "abc123xyz789"
+redacts secret     "export CLIENT_SECRET='s3cr3t value here'"                     "s3cr3t value"
+redacts pem        "$(printf 'echo "-----BEGIN RSA PRIVATE KEY-----\nMIIEowIBAAKCAQEA\nQUJDREVGRw==\n-----END RSA PRIVATE KEY-----" > k.pem')" "MIIEowIBAAKC"
+redacts hex        "echo $(printf '0123456789abcdef%.0s' 1 2 3)"                  "0123456789abcdef0123456789abcdef0"
+redacts base64     "echo Zm9vYmFyQmF6UXV4MTIzNDU2Nzg5MGFiY2RlZg | base64 -d"    "Zm9vYmFyQmF6UXV4MTIzNDU2"
+redacts url-cred   "git clone https://user:p4ssw0rd@github.com/x/y.git"           "p4ssw0rd"
+untouched() { local out; out=$(printf '%s' "$1" | "$J" redact); if [ "$out" = "$1" ]; then ok "jev-redact:keeps:$2"; else bad "jev-redact:keeps:$2" "got '$out'"; fi; }
+untouched 'git push --set-upstream origin bugfix/token-count'      "branch-named-token"
+untouched 'rm -rf /Users/jgavinray/dev/mission-control/src/components' "long-path"
+untouched 'docker compose up -d --build'                           "plain"
+
+# A stub service records what it is sent. Port is chosen by the OS.
+JT=$(mktemp -d); JPORT_FILE="$JT/port"; JBODY="$JT/body"
+python3 - "$JPORT_FILE" "$JBODY" "${JEV_STUB_DELAY:-0}" <<'PYEOF' &
+import http.server, sys, time
+portfile, bodyfile, delay = sys.argv[1], sys.argv[2], float(sys.argv[3])
+class H(http.server.BaseHTTPRequestHandler):
+    def log_message(self, *a): pass
+    def do_POST(self):
+        n = int(self.headers.get("content-length") or 0)
+        data = self.rfile.read(n)
+        with open(bodyfile, "ab") as f: f.write(data + b"\n")
+        time.sleep(delay)
+        try:
+            self.send_response(200); self.send_header("content-length", "2"); self.end_headers(); self.wfile.write(b"{}")
+        except OSError: pass
+s = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+open(portfile, "w").write(str(s.server_address[1]))
+s.serve_forever()
+PYEOF
+JSTUB=$!
+for _ in $(seq 50); do [ -s "$JPORT_FILE" ] && break; sleep 0.1; done
+JURL="http://127.0.0.1:$(cat "$JPORT_FILE")"
+OFFF="$JT/off"   # kill-switch file used by these tests (absent = shadow on)
+
+waitbody() { for _ in $(seq 60); do [ -s "$JBODY" ] && return 0; sleep 0.1; done; return 1; }
+# decision_of CMD -> allow|deny|ask, with the shadow call ON, pointed at $URL
+decision_with() { # url, cmd
+  local out
+  out=$(jq -n --arg c "$2" '{tool_input:{command:$c}, cwd:"/tmp"}' | JEV_SHADOW_OFF_FILE="$OFFF" JEV_SHADOW_URL="$1" "$G")
+  if [ -z "$out" ]; then echo allow; else printf '%s' "$out" | jq -r '.hookSpecificOutput.permissionDecision // "allow"'; fi
+}
+
+# 1. A reachable service gets the redacted command, and only that.
+: > "$JBODY"
+TOKEN="ghp_$(printf 'Z%.0s' $(seq 36))"
+d=$(decision_with "$JURL" "curl -H 'Authorization: Bearer $TOKEN' https://api.github.com/user")
+if [ "$d" = allow ]; then ok "jev-shadow:decision-unchanged-allow"; else bad "jev-shadow:decision-unchanged-allow" "got $d"; fi
+if waitbody; then ok "jev-shadow:request-arrives"; else bad "jev-shadow:request-arrives" "nothing within 6s"; fi
+T "jev-shadow:body-is-valid-jev-request" bash -c "head -1 '$JBODY' | jq -e '.questions.verdict.type == \"choice\" and (.questions.verdict.criteria | keys | length) == 5 and (.state | contains(\"api.github.com\"))'"
+TN "jev-shadow:raw-secret-never-sent" grep -q "ZZZZZZZZZZ" "$JBODY"
+T  "jev-shadow:mask-marker-sent" grep -q "REDACTED" "$JBODY"
+
+# 2. Decisions are unchanged whether the service is up, down, or black-holed.
+for pair in "up|$JURL" "refused|http://127.0.0.1:9" "blackhole|http://192.0.2.1:9"; do
+  name=${pair%%|*}; url=${pair#*|}
+  d=$(JEV_SHADOW_TIMEOUT=2 decision_with "$url" 'git push --force origin main')
+  if [ "$d" = deny ]; then ok "jev-shadow:deny-kept:$name"; else bad "jev-shadow:deny-kept:$name" "got $d"; fi
+  d=$(JEV_SHADOW_TIMEOUT=2 decision_with "$url" 'npm publish')
+  if [ "$d" = ask ]; then ok "jev-shadow:ask-kept:$name"; else bad "jev-shadow:ask-kept:$name" "got $d"; fi
+done
+
+# 3. Speed: the hook returns without waiting, and the shadow call adds under
+# 20 ms (median of 21 runs, alternating, against an unreachable black hole
+# with a 5 s timeout, so a hook that waited would add seconds).
+JEV_TIMING=$(python3 - "$G" "$OFFF" <<'PYEOF'
+import json, os, statistics, subprocess, sys, time
+guard, offf = sys.argv[1], sys.argv[2]
+payload = json.dumps({"tool_input": {"command": "ls -la"}, "cwd": "/tmp"}).encode()
+def run(shadow_on):
+    env = dict(os.environ, JEV_SHADOW_URL="http://192.0.2.1:9", JEV_SHADOW_TIMEOUT="5",
+               JEV_SHADOW_OFF_FILE=offf if shadow_on else "/")
+    t = time.perf_counter()
+    subprocess.run([guard], input=payload, env=env, stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, check=True)
+    return (time.perf_counter() - t) * 1000
+run(True); run(False)
+on, off = [], []
+for _ in range(21):
+    on.append(run(True)); off.append(run(False))
+print("%.1f %.1f" % (statistics.median(on), statistics.median(off)))
+PYEOF
+)
+read -r JON JOFF <<<"$JEV_TIMING"
+JDIFF=$(python3 -c "print(round($JON - $JOFF, 1))")
+if python3 -c "import sys; sys.exit(0 if $JON - $JOFF < 20 else 1)"; then ok "jev-shadow:adds-under-20ms (on ${JON}ms, off ${JOFF}ms, +${JDIFF}ms)"; else bad "jev-shadow:adds-under-20ms" "on ${JON}ms off ${JOFF}ms"; fi
+
+# 4. Kill switch: with the file present, nothing is sent.
+: > "$JBODY"; touch "$OFFF"
+jq -n '{tool_input:{command:"ls"}, cwd:"/tmp"}' | JEV_SHADOW_OFF_FILE="$OFFF" JEV_SHADOW_URL="$JURL" "$G" >/dev/null
+sleep 1.5
+if [ -s "$JBODY" ]; then bad "jev-shadow:kill-switch" "request was sent"; else ok "jev-shadow:kill-switch"; fi
+rm -f "$OFFF"
+
+kill "$JSTUB" 2>/dev/null; wait "$JSTUB" 2>/dev/null
+rm -rf "$JT"
 
 # ---- post-edit-check ---------------------------------------------------------
 P="$HERE/hooks/post-edit-check.sh"

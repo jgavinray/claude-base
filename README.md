@@ -32,13 +32,14 @@ settings.json        hook wiring + permissions.deny, merged into ~/.claude/setti
 hooks/
   session-context.sh SessionStart: branch, dirty files, and whether the gate has teeth
   pretool-guard.sh   PreToolUse(Bash): two-tier deny/ask on destructive commands
+  jev-shadow.sh      secret masking plus the background shadow call to the Jev service
   post-edit-check.sh PostToolUse(Edit|Write): instant syntax check; arms the Stop gate
   stop-gate.sh       Stop: blocks until verify.sh exits 0 (edit-triggered)
 verify/verify.sh     the auto-detecting verifier -> <repo>/.claude/verify.sh
 agents/              planner, qa-tester, verifier, code-reviewer, doc-manager
 skills/workflow/     opt-in state machine for multi-step work
 templates/           project CLAUDE.md skeleton
-tests/base-test.sh   136 checks; claude-base gates itself with its own contract
+tests/base-test.sh   206 checks; claude-base gates itself with its own contract
 install.sh           install the global layer
 uninstall.sh         remove exactly what install.sh added
 init-repo.sh         arm one repository (baselines what already fails)
@@ -80,6 +81,28 @@ automatically, and a repo with no `.claude/verify.sh` simply has no gate — the
 Stop hook exits silently, the guard and per-edit syntax checks stay active, and
 SessionStart reports `GATE ABSENT` so a green result is never implied. There is
 no preflight. `init-repo.sh` is how you opt a repo *in*, when you want one.
+
+## Jev shadow call
+
+Since 10/20/2026 the guard also sends each shell command to a local Jev-style
+decision service (`jev/` in `jgavinray/mission-control`, on hyper01 port 8102,
+backed by GLM). It asks "what is the risk of this command?" (read, edit, push,
+deploy, destroy) and the service logs the answer so it can be spot-checked
+later. Nothing acts on the answer yet.
+
+- **Shadow only.** The call runs in the background, nothing waits for it, and
+  it never changes a deny, ask or allow. If the service is down or slow, the
+  hook behaves the same. The call adds under 20 ms (tested; measured about 2 ms).
+- **Secrets are masked on this machine first** (`jev-shadow.sh redact`):
+  `ghp_`/`gho_`/..., `github_pat_`, `hf_`, `sk-`, `AKIA`, `xox*`, `Bearer`/`Basic`/`Token`
+  values, `password=`/`token=`/`secret=`/`api_key=` values, PEM blocks, URL
+  passwords, and hex or base64-looking runs over 32 characters. The command
+  travels on stdin, never on a command line.
+- **Kill switch:** `touch ~/.claude/jev-shadow-off` stops it at once (the guard
+  checks the file on every command); `rm ~/.claude/jev-shadow-off` turns it back on.
+- Settings: `JEV_SHADOW_URL` (default `http://192.168.0.44:8102`),
+  `JEV_SHADOW_TIMEOUT` seconds (default 8).
+- `install.sh` copies `jev-shadow.sh` with the other hooks.
 
 ## Reproducibility
 
