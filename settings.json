@@ -1,0 +1,65 @@
+{
+  "_comment": "claude-base global hook wiring. Merge into ~/.claude/settings.json (install.sh does this with a backup). Paths use $HOME because these hooks are installed once and apply to every repo; $CLAUDE_PROJECT_DIR would resolve to whichever repo is open and break.",
+  "hooks": {
+    "SessionStart": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$HOME/.claude/hooks/session-context.sh",
+            "timeout": 15
+          }
+        ]
+      }
+    ],
+    "PreToolUse": [
+      {
+        "matcher": "Bash",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$HOME/.claude/hooks/pretool-guard.sh",
+            "timeout": 10
+          }
+        ]
+      }
+    ],
+    "PostToolUse": [
+      {
+        "matcher": "Edit|Write",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$HOME/.claude/hooks/post-edit-check.sh",
+            "timeout": 30
+          }
+        ]
+      }
+    ],
+    "Stop": [
+      {
+        "hooks": [
+          {
+            "type": "command",
+            "command": "$HOME/.claude/hooks/stop-gate.sh",
+            "timeout": 900,
+            "statusMessage": "Running verification gate"
+          }
+        ]
+      }
+    ]
+  },
+  "permissions": {
+    "deny": [
+      "Bash(rm -rf /*)",
+      "Bash(mkfs*)",
+      "Bash(terraform destroy*)",
+      "Bash(helm uninstall*)",
+      "Bash(argocd app delete*)"
+    ]
+  },
+  "attribution": {
+    "commit": "",
+    "pr": ""
+  }
+}
