@@ -30,6 +30,15 @@ CMD=$(printf '%s' "$INPUT" | jq -r '.tool_input.command // empty')
 CWD=$(printf '%s' "$INPUT" | jq -r '.cwd // empty')
 [ -n "$CWD" ] || CWD=$PWD
 
+# Shadow call (10/20/2026): send the command, secrets masked, to the local Jev
+# service in the background so its answers can be spot-checked later. It never
+# waits and never changes a decision below. Skipped while
+# ~/.claude/jev-shadow-off exists. See hooks/jev-shadow.sh.
+JEV_SHADOW="${0%/*}/jev-shadow.sh"
+if [ ! -e "${JEV_SHADOW_OFF_FILE:-$HOME/.claude/jev-shadow-off}" ] && [ -x "$JEV_SHADOW" ]; then
+  { printf '%s' "$CMD" | "$JEV_SHADOW"; } >/dev/null 2>&1 </dev/null &
+fi
+
 # Heredoc bodies are data (commit messages, files being written, scripts for
 # python), not commands, so they are dropped before matching. The exception is
 # a heredoc fed to a shell or ssh, which runs as commands and stays.
