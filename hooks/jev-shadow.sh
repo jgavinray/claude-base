@@ -16,22 +16,132 @@
 # JEV_SHADOW_TIMEOUT seconds (default 8).
 set -u
 
-redact() {
-  perl -e '
-    use strict; use warnings; use Encode ();
-    local $/; my $t = <STDIN>; $t = "" unless defined $t;
-    $t = Encode::decode("UTF-8", $t, Encode::FB_DEFAULT);
-    $t =~ s/-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?(?:-----END [A-Z0-9 ]*PRIVATE KEY-----|\z)/[REDACTED:pem]/gs;
-    $t =~ s/\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|hf_[A-Za-z0-9]{20,}|sk-[A-Za-z0-9_-]{16,}|AKIA[0-9A-Z]{16}|xox[abprs]-[A-Za-z0-9-]{10,})/[REDACTED:key]/g;
-    $t =~ s/\b(Bearer|Basic|Token)\s+[A-Za-z0-9._~+\/=-]{8,}/$1 [REDACTED:auth]/gi;
-    $t =~ s/\b([A-Za-z0-9_.-]*(?:password|passwd|token|secret|api[_-]?key|access[_-]?key)[A-Za-z0-9_.-]*)(\s*[=:]\s*)("[^"]*"|\x27[^\x27]*\x27|[^\s\x27"]+)/$1$2\[REDACTED:value]/gi;
-    $t =~ s/(:\/\/[^\/\s:@]+:)[^@\s\/]+(@)/$1\[REDACTED:pw]$2/g;
-    $t =~ s/\b[0-9A-Fa-f]{33,}\b/[REDACTED:hex]/g;
-    $t =~ s/([A-Za-z0-9+\/_-]{33,}={0,2})/my $s = $1; ($s =~ m{[0-9]} && $s =~ m{[a-z]} && $s =~ m{[A-Z]}) ? "[REDACTED:b64]" : $s/ge;
-    $t = substr($t, 0, 4000);
-    binmode(STDOUT, ":utf8"); print $t;
-  '
+# The masking program is perl. It sits in a variable (not inline) so it can
+# hold single quotes. Same rules as fleetlib/redact.py and jev/redact.py in
+# mission-control: keep the three in step (see wiki/jev-glm-service.md).
+read -r -d '' REDACT_PL <<'PERL'
+use strict; use warnings; use Encode ();
+local $/; my $t = <STDIN>; $t = "" unless defined $t;
+$t = Encode::decode("UTF-8", $t, Encode::FB_DEFAULT);
+
+# ---- helpers for the credential rules (ported from jev-evals agentlogs/redact.py)
+my %SKIP = map { $_ => 1 } qw(true false yes no ok none null nil nan undefined pass passed fail failed password passwd pwd pw user username xxx xxxx secret-key);
+my %STOP = map { $_ => 1 } qw(a an the this that these those it its is was are be been being not no yes none null nil true false
+empty blank unset set missing required invalid wrong incorrect correct valid expired stored saved hashed encrypted salted
+plain plaintext cleartext visible hidden shown printed logged exposed leaked for in on at to of and or but if so then than
+too now here there what which who how why when where while with without from into by as your you my our their his her we
+they i he she one another same different new old default current former right okay fine good bad long short strong weak
+simple complex random generated needed asked entered typed sent read written changed reset updated rotated removed deleted
+rejected accepted ignored supplied provided given used unused only also still just very quite really actually likely
+probably maybe perhaps always never often sometimes already again yet please optional mandatory stdin env environment
+file prompt field form page screen box input output value string text example below above see shown via using through
+hard easy ready done fixed unchanged unknown unavailable disabled enabled allowed denied sufficient fed pasted cheap
+expensive secure insecure safe unsafe public private known lost forgotten reused shared temporary temp local remote locked
+unlocked pending authorised authorized accessible protected supposed meant important);
+
+sub unq { my ($v) = @_; return (length($v) > 1 && $v =~ /\A["'`]/) ? substr($v, 1, -1) : $v; }
+sub wrap {
+  my ($v, $ph) = @_;
+  return '\\"' . $ph . '\\"' if length($v) >= 4 && $v =~ /\A\\"/ && $v =~ /\\"\z/;
+  return $1 . $ph . substr($v, -1) if length($v) > 1 && $v =~ /\A(["'`])/;
+  return $ph;
 }
+
+# Should this prose value be masked? A strong connector (is, :, =) also masks a plain word;
+# a weak one needs a digit, symbol, mixed case or quotes, so ordinary prose stays readable.
+sub prose_ok {
+  my ($v, $strong) = @_;
+  my $q = ($v =~ /\A["'`]/) ? 1 : 0;
+  my $inner = unq($v);
+  return 0 if $inner eq "" || index($inner, "REDACTED") >= 0 || $inner =~ /\A[\$%{<*\/]/ || $inner =~ /\A[xX.\-_#*]+\z/;
+  my $low = lc $inner;
+  return 0 if $SKIP{$low};
+  return $STOP{$low} ? 0 : 1 if $q;
+  return 0 if $inner =~ /\A[-+]?[\d.,:\/%]+\z/ && length($inner) < 8;
+  return 0 if $inner =~ /\A[A-Za-z_]\w*(?:\.[A-Za-z_]\w*)+\z/ || index($inner, "::") >= 0;
+  return 0 if length($inner) < 3 && $inner !~ /[A-Za-z0-9]/;
+  my $dig = $inner =~ /\d/; my $alpha = $inner =~ /[A-Za-z]/;
+  my $mixed = (substr($inner, 1) =~ /[A-Z]/ && $inner =~ /[a-z]/) ? 1 : 0;
+  return 1 if $inner =~ /[!@#\$%^&*~?]/;
+  if ($strong) {
+    return 1 if $dig || $mixed;
+    return ($inner =~ /\A[A-Za-z]+\z/ && length($inner) >= 3 && !$STOP{$low}) ? 1 : 0;
+  }
+  return (($dig && $alpha && length($inner) >= 6) || ($mixed && length($inner) >= 6)) ? 1 : 0;
+}
+
+# A value on a command line: variables, redirects and other flags are not secrets.
+sub shell_ok {
+  my ($v, $dash_ok) = @_;
+  my $inner = unq($v);
+  return 0 if $inner eq "" || index($inner, "REDACTED") >= 0;
+  return 0 if $v !~ /\A'/ && $inner =~ /\A[\$<]/;
+  return 0 if !$dash_ok && $inner =~ /\A-/;
+  return 0 if $SKIP{lc $inner};
+  return 1;
+}
+
+# Apply one (prefix)(value) rule. $ok->($value) says whether to mask.
+sub apply { my ($rx, $ph, $ok) = @_;
+  $t =~ s{$rx}{ my ($pre, $val) = ($1, $2); my $whole = $&; $ok->($val) ? $pre . wrap($val, $ph) : $whole }gse; }
+
+$t =~ s/-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?(?:-----END [A-Z0-9 ]*PRIVATE KEY-----|\z)/[REDACTED:pem]/gs;
+$t =~ s/\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|hf_[A-Za-z0-9]{20,}|sk-[A-Za-z0-9_-]{16,}|AKIA[0-9A-Z]{16}|xox[abprs]-[A-Za-z0-9-]{10,})/[REDACTED:key]/g;
+$t =~ s/\b(Bearer|Basic|Token)\s+[A-Za-z0-9._~+\/=-]{8,}/$1 [REDACTED:auth]/gi;
+# name=value, name: value, JSON "name": "value" (also JSON-escaped quotes). A $VAR value is a reference, not a secret.
+$t =~ s{\b([A-Za-z0-9_.-]*(?:password|passwd|token(?!s(?![A-Za-z])|iz)|secret|api[_-]?key|access[_-]?key)[A-Za-z0-9_.-]*)(\\?["']?\s*[=:]\s*)(\\"[^"\\\n]*\\"|"[^"]*"|'[^']*'|[^\s'"]+)}
+       { (substr($3, 0, 1) eq '$' || index($3, "[REDACTED") == 0) ? $& : $1 . $2 . wrap($3, "[REDACTED:value]") }gie;
+$t =~ s/(:\/\/[^\/\s:@]+:)[^@\s\/]+(@)/$1\[REDACTED:pw]$2/g;
+
+# ---- passwords in command lines (the tool or the variable name makes it a password)
+my $SV = q~"[^"\n]*"|'[^'\n]*'|[^\s'"`;&|<>()]+~;
+my $GAP = q~[^;&|\n()]*?~;
+my $PW = "[REDACTED:pw]";
+# env assignments: ZB_PW=..., PASS=..., DB_PASSWD=..., svc_pwd=...
+apply(qr{(?<![A-Za-z0-9\$/])((?:[A-Za-z0-9]+[_.-])*(?-i:PW|PWD|PASS|PASSWD|PASSCODE)(?:[_.-][A-Za-z0-9]+)*=|(?:[A-Za-z0-9]+[_.-])+(?i:pw|pwd|pass|passwd|passcode)=)($SV)}, $PW, sub { prose_ok($_[0], 1) });
+# --password VALUE, --db-password VALUE, --pass VALUE, --client-secret VALUE, --token VALUE (the = form is above)
+apply(qr{(?<![A-Za-z0-9_-])((?i:--(?:[a-z0-9]+-)*(?:(?:password|passwd|passphrase|secret|token|api-?key|access-?key)(?:-(?!(?:stdin|file|env|prompt|cmd|command|helper|store|path|dir|length|policy)\b)[a-z0-9]+)*|pass|pw|pwd))(?:=|[ \t]+))($SV)}, $PW, sub { shell_ok($_[0], 0) });
+# sshpass -p VALUE (after its own flags only, so "sshpass -e ssh -p 22 host" keeps its port)
+apply(qr{(\bsshpass[ \t]+(?:(?:-[ev]|-[fdP][ \t]*\S+)[ \t]+)*-p[ \t]*)($SV)}, $PW, sub { shell_ok($_[0], 1) });
+# mysql family: -pVALUE or -p VALUE. Other tools' -p (ssh -p 22, grep -p) are not touched.
+apply(qr{(\b(?:mysql|mysqldump|mysqladmin|mysqlimport|mysqlshow|mysqlcheck|mysqlpump|mysqlbinlog|mariadb|mariadb-dump|mariadb-admin|mariadb-import|mariadb-show|mariadb-check)\b$GAP[ \t]-p(?!rint\b|rune\b|erm\b)[ \t]*)($SV)}, $PW, sub { shell_ok($_[0], 0) });
+apply(qr{(\bdocker[ \t]+login\b$GAP[ \t]-p[ \t]*)($SV)}, $PW, sub { shell_ok($_[0], 0) });
+apply(qr{(\bredis-cli\b$GAP[ \t]-a[ \t]+)($SV)}, $PW, sub { shell_ok($_[0], 0) });
+apply(qr{(\bldap(?:search|modify|add|delete|passwd|compare|whoami|modrdn)\b$GAP[ \t]-w[ \t]*)($SV)}, $PW, sub { shell_ok($_[0], 0) });
+apply(qr{(-pass(?:in|out)?[ \t]+pass:)($SV)}, $PW, sub { shell_ok($_[0], 1) });
+# curl -u USER:PASS (the user name stays)
+apply(qr{(\bcurl\b$GAP[ \t](?:-[A-Za-z]*u|--user)(?:[ \t]+|=)?["']?[^\s:'"]+:)([^\s'";&|]+)}, $PW, sub { shell_ok($_[0], 1) });
+
+# ---- passwords in prose (ported from jev-evals agentlogs/redact.py; value only)
+my $PHP = "[REDACTED:prose-password]";
+my $PWK = '(?:password|passwd|passcode|passphrase|pwd|pw)';
+my $USER = q~[`'"]?[\w.@\-]+[`'"]?~;
+my $VAL  = q~(`[^`\s]{1,64}`|"[^"\s]{1,64}"|'[^'\s]{1,64}'|[^\s`'"<>(){}\[\],;]*[^\s`'"<>(){}\[\],;.:?*])~;
+my $VALQ = q~(`[^`\s]{1,64}`|"[^"\s]{1,64}"|'[^'\s]{1,64}'|[^\s`'"<>(){}\[\],;&]*[^\s`'"<>(){}\[\],;&.:?*])~;
+my $PWFOR = '(?:[ \t]+(?:for|of)[ \t]+(?:the[ \t]+)?(?:(?:user|account|login|admin)[ \t]+)?' . $USER . ')?';
+my $LOGIN = '\blog(?:ged|ging)?[ \t-]?in[ \t]+(?:as|with|using)[ \t]+(?:user(?:name)?[ \t]+)?' . $USER;
+my @PROSE = (
+  [ '(?i)(?<![A-Za-z0-9$])((?:[A-Za-z0-9]+[_\-])*(?:password|passwd|passcode|passphrase)[`\'"]?[ \t]*(?::=|[:=])[ \t]*)' . $VALQ, 1 ],
+  [ '(?i)(?<![A-Za-z0-9$])((?:[A-Za-z0-9]+[_\-])*(?:(?-i:pass|Pass)|pw|pwd)[`\'"]?[ \t]*(?::=|[:=])[ \t]*)' . $VALQ, 0 ],
+  [ '(?i)\b(' . $PWK . $PWFOR . '[ \t]+(?:is|was|are)\b[ \t]*:?[ \t]*)' . $VAL, 1 ],
+  [ '(?i)\b(' . $PWK . $PWFOR . '[ \t]+(?:(?:is|was|has been|will be|should be)[ \t]+)?(?:set|changed|reset|updated|rotated)?[ \t]*(?:to|->|\x{2192})[ \t]+)' . $VAL, 0 ],
+  [ '(?i)(' . $LOGIN . '[ \t]*[/:,][ \t]*)' . $VAL, 0 ],
+  [ '(?i)(' . $LOGIN . '[,;]?[ \t]+(?:(?:with|and)[ \t]+)?(?:the[ \t]+)?' . $PWK . '[ \t]*(?:is|=|:)?[ \t]*)' . $VAL, 1 ],
+  [ '(?i)\b((?:user(?:name)?|login|account|acct|id)[ \t]*[:=]?[ \t]*(?:is[ \t]+)?' . $USER . '[,;]?[ \t]+(?:(?:and|with)[ \t]+)?' . $PWK . '[ \t]*[:=]?[ \t]*)' . $VAL, 0 ],
+  [ '(?i)\b((?:credentials?|creds?)\b[ \t]*(?:(?:are|is)[ \t]*)?[:=]?[ \t]*' . $USER . '[ \t]*[:/][ \t]*)' . $VAL, 0 ],
+);
+for my $r (@PROSE) {
+  my ($src, $strong) = @$r;
+  apply(qr{$src}, $PHP, sub { prose_ok($_[0], $strong) });
+}
+
+$t =~ s/\b[0-9A-Fa-f]{33,}\b/[REDACTED:hex]/g;
+$t =~ s/([A-Za-z0-9+\/_-]{33,}={0,2})/my $s = $1; ($s =~ m{[0-9]} && $s =~ m{[a-z]} && $s =~ m{[A-Z]}) ? "[REDACTED:b64]" : $s/ge;
+$t = substr($t, 0, 4000);
+binmode(STDOUT, ":utf8"); print $t;
+PERL
+
+redact() { perl -e "$REDACT_PL"; }
 
 if [ "${1:-}" = "redact" ]; then redact; exit 0; fi
 
