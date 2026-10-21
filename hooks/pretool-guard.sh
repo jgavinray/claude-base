@@ -316,7 +316,7 @@ m '\b(drop +database|drop +schema|truncate +table)\b' && decide deny "pretool-gu
 m "${CP}docker +[^;&|]*(volume +prune|prune +[^;&|]*--volumes|(system|image) +prune +[^;&|]*(-a\b|--all))" && decide deny "pretool-guard: this prune removes volumes (data) or every unused image (rollback images included). Remove the specific image or volume by name instead."
 
 # Git: force-push, unless it is the safe variant
-if m "${CP}git +(-C +[^ ]+ +)?push +[^;&|]*(--force|[^a-z-]-f\b)"; then
+if m "${CP}git +(-C +[^ ]+ +)?push( +[^;&|]*)? +(--force|-f)\b"; then
   m "${CP}git +(-C +[^ ]+ +)?push +[^;&|]*--force-with-lease" || decide deny "pretool-guard: force push — blocked. Use --force-with-lease."
 fi
 
