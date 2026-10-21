@@ -139,6 +139,63 @@ covers() { # dir, path → true when path is dir itself or inside it
   [ "$1" = / ] || [ "$1" = "$2" ] || case "$2" in "$1"/*) return 0 ;; *) return 1 ;; esac
 }
 
+# Scratch that may be deleted whole, with no git check (10/21/2026): the system
+# temp dirs, Claude scratchpads (under /private/tmp), the runner's worktree
+# folder, and any path listed one per line in ~/.claude/guard-ephemeral. These
+# held copies the session itself made, and refusing them handed every cleanup
+# to the owner as a manual command.
+physpath() { # absolute path → same path with every symlink resolved; unchanged if its folder does not exist
+  local p="$1" i=0 t d b
+  while [ "$i" -lt 20 ] && [ -L "$p" ]; do
+    t=$(readlink "$p")
+    case "$t" in /*) p=$t ;; *) p="${p%/*}/$t" ;; esac
+    p=$(normpath "$p"); i=$((i + 1))
+  done
+  d=${p%/*}; b=${p##*/}
+  if [ -d "${d:-/}" ] && d=$(cd -P "${d:-/}" 2>/dev/null && pwd -P); then
+    [ "$d" = / ] && d=""
+    printf '%s/%s' "$d" "$b"
+  else
+    printf '%s' "$p"
+  fi
+}
+
+# Roots in which anything below the root (not the root itself) is scratch.
+scratch_roots() {
+  local t=${TMPDIR:-}
+  printf '%s\n' /tmp /private/tmp "$HOME/.cache/runner/work"
+  [ -n "${t%/}" ] && printf '%s\n' "${t%/}"
+}
+
+# Under a root, or equal to a listed path. Roots covering / or home are ignored
+# so a bad TMPDIR or a bad list line cannot open up everything.
+in_scratch() { # absolute path
+  local a="$1" root r f line
+  while IFS= read -r root; do
+    [ -n "$root" ] || continue
+    for r in "$root" "$(physpath "$root")"; do
+      covers "$r" "$HOME" && continue
+      case "$a" in "$r"/?*) return 0 ;; esac
+    done
+  done <<EOF2
+$(scratch_roots)
+EOF2
+  [[ "$a" =~ ^(/private)?/var/folders/[^/]+/[^/]+/T/.+ ]] && return 0
+  f=${GUARD_EPHEMERAL_FILE:-$HOME/.claude/guard-ephemeral}
+  if [ -r "$f" ]; then
+    while IFS= read -r line || [ -n "$line" ]; do
+      line=${line%%#*}; line=${line#"${line%%[![:space:]]*}"}; line=${line%"${line##*[![:space:]]}"}
+      case "$line" in '~'/*) line="$HOME/${line#\~/}" ;; /*) ;; *) continue ;; esac
+      line=$(normpath "$line")
+      for r in "$line" "$(physpath "$line")"; do
+        covers "$r" "$HOME" && continue
+        covers "$r" "$a" && return 0
+      done
+    done < "$f"
+  fi
+  return 1
+}
+
 # Decide whether deleting an existing local path loses anything git can't bring
 # back: untracked or modified files, or ignored files that are not build/cache
 # output. find mode drops ignored files from the count, because find's -name
@@ -172,6 +229,15 @@ check_target() { # cwd, target as written, mode (rm|find)
         decide deny "pretool-guard: 'rm -r $w' would remove everything under it and has no targeted alternative. Blocked — name the specific path you mean." ;;
     esac
   fi
+  # $TMPDIR is the session's own temp dir; read it from the environment.
+  if [ -n "${TMPDIR:-}" ]; then
+    case "$w" in
+      '$TMPDIR') w=${TMPDIR%/} ;;
+      '${TMPDIR}') w=${TMPDIR%/} ;;
+      '$TMPDIR'/*) w="${TMPDIR%/}/${w#'$TMPDIR'/}" ;;
+      '${TMPDIR}'/*) w="${TMPDIR%/}/${w#'${TMPDIR}'/}" ;;
+    esac
+  fi
   case "$w" in
     *'$'*|*'`'*) decide deny "pretool-guard: cannot tell what '$raw' points to (a shell variable set outside this command). Write the literal path so it can be checked." ;;
   esac
@@ -192,9 +258,12 @@ check_target() { # cwd, target as written, mode (rm|find)
 
   a=$(to_abs "$c" "$w")
   [ "$a" = "?" ] && decide deny "pretool-guard: cannot tell which directory '$w' is relative to (an earlier cd used a variable). Use an absolute path."
-  case "$a" in
-    /tmp/?*|/private/tmp/?*|/var/folders/?*|/private/var/folders/?*) return 0 ;;
-  esac
+  # Scratch is judged by where it really is: a symlink in /tmp that points into
+  # home is judged as the home path it leads to.
+  if in_scratch "$a"; then
+    in_scratch "$(physpath "$a")" && return 0
+    a=$(physpath "$a")
+  fi
 
   # A wildcard deletes from the directory that holds it; judge that directory.
   case "$a" in
