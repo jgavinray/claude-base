@@ -27,7 +27,7 @@ explicitly (`GATE INERT`), and the `verifier` agent reports `INERT` rather than
 ## Layout
 
 ```
-CLAUDE.md            global rules (~30 lines) -> ~/.claude/CLAUDE.md
+CLAUDE.md            global rules (at most 60 lines) -> ~/.claude/CLAUDE.md
 settings.json        hook wiring + permissions.deny, merged into ~/.claude/settings.json
 hooks/
   session-context.sh SessionStart: branch, dirty files, and whether the gate has teeth

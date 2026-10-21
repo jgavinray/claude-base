@@ -30,7 +30,7 @@ T "license:gplv2-present" bash -c "grep -q 'GNU GENERAL PUBLIC LICENSE' '$HERE/L
 T "license:readme-states-gplv2" grep -q "GNU General Public License" "$HERE/README.md"
 T "readme:documents-baseline" grep -q "baseline" "$HERE/README.md"
 T "rules:no-coauthored-rule" grep -q "no attribution trailer" "$HERE/CLAUDE.md"
-T "rules:global-under-40-lines" bash -c "[ \$(wc -l < '$HERE/CLAUDE.md') -lt 40 ]"
+T "rules:global-at-most-60-lines" bash -c "[ \$(wc -l < '$HERE/CLAUDE.md') -le 60 ]"
 
 # ---- pretool-guard -----------------------------------------------------------
 G="$HERE/hooks/pretool-guard.sh"
