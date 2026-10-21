@@ -272,6 +272,17 @@ expect_out flag      "tool --password fakeFlag99 https://x"                   "t
 expect_out curl-user "curl -u admin:fakeCurl1 https://x"                      "curl -u admin:[REDACTED:pw] https://x"
 expect_out json      "{\"password\": \"fakeJson77\"}"                         "{\"password\": \"[REDACTED:value]\"}"
 expect_out prose     "log in as admin / fakeProse2 on the box"                "log in as admin / [REDACTED:prose-password] on the box"
+# A huge hyphenated or repeated command must not pin a CPU in the background: each stays under 5 seconds.
+slow_in() { # label, unit, repeat count
+  local t0 t1; t0=$(python3 -c 'import time;print(time.time())')
+  python3 -c "import sys; sys.stdout.write(sys.argv[1]*int(sys.argv[2]))" "$2" "$3" | "$J" redact >/dev/null 2>&1
+  t1=$(python3 -c 'import time;print(time.time())')
+  if python3 -c "import sys; sys.exit(0 if $t1 - $t0 < 5 else 1)"; then ok "jev-redact:fast:$1"; else bad "jev-redact:fast:$1" "took over 5s"; fi
+}
+slow_in hyphens "ab-" 70000
+slow_in mysql-words "mysql " 30000
+slow_in docker-login "docker login " 20000
+slow_in pw-hyphens "pw-" 100000
 # Ordinary commands that look close to the forms above stay exactly as they are.
 untouched 'git status'                                   "git-status"
 untouched 'ssh -p 22 host'                               "ssh-port"

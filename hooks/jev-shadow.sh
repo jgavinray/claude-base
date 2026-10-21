@@ -23,6 +23,7 @@ read -r -d '' REDACT_PL <<'PERL'
 use strict; use warnings; use Encode ();
 local $/; my $t = <STDIN>; $t = "" unless defined $t;
 $t = Encode::decode("UTF-8", $t, Encode::FB_DEFAULT);
+$t = substr($t, 0, 20000);   # only the first 4000 characters are sent; this keeps the patterns fast on huge input
 
 # ---- helpers for the credential rules (ported from jev-evals agentlogs/redact.py)
 my %SKIP = map { $_ => 1 } qw(true false yes no ok none null nil nan undefined pass passed fail failed password passwd pwd pw user username xxx xxxx secret-key);
@@ -89,16 +90,16 @@ $t =~ s/-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----.*?(?:-----END [A-Z0-9 ]*PRIVATE KE
 $t =~ s/\b(?:gh[pousr]_[A-Za-z0-9]{20,}|github_pat_[A-Za-z0-9_]{20,}|hf_[A-Za-z0-9]{20,}|sk-[A-Za-z0-9_-]{16,}|AKIA[0-9A-Z]{16}|xox[abprs]-[A-Za-z0-9-]{10,})/[REDACTED:key]/g;
 $t =~ s/\b(Bearer|Basic|Token)\s+[A-Za-z0-9._~+\/=-]{8,}/$1 [REDACTED:auth]/gi;
 # name=value, name: value, JSON "name": "value" (also JSON-escaped quotes). A $VAR value is a reference, not a secret.
-$t =~ s{\b([A-Za-z0-9_.-]*(?:password|passwd|token(?!s(?![A-Za-z])|iz)|secret|api[_-]?key|access[_-]?key)[A-Za-z0-9_.-]*)(\\?["']?\s*[=:]\s*)(\\"[^"\\\n]*\\"|"[^"]*"|'[^']*'|[^\s'"]+)}
+$t =~ s{\b([A-Za-z0-9_.-]{0,64}(?:password|passwd|token(?!s(?![A-Za-z])|iz)|secret|api[_-]?key|access[_-]?key)[A-Za-z0-9_.-]{0,64})(\\?["']?\s*[=:]\s*)(\\"[^"\\\n]*\\"|"[^"]*"|'[^']*'|[^\s'"]+)}
        { (substr($3, 0, 1) eq '$' || index($3, "[REDACTED") == 0) ? $& : $1 . $2 . wrap($3, "[REDACTED:value]") }gie;
 $t =~ s/(:\/\/[^\/\s:@]+:)[^@\s\/]+(@)/$1\[REDACTED:pw]$2/g;
 
 # ---- passwords in command lines (the tool or the variable name makes it a password)
 my $SV = q~"[^"\n]*"|'[^'\n]*'|[^\s'"`;&|<>()]+~;
-my $GAP = q~[^;&|\n()]*?~;
+my $GAP = q~[^;&|\n()]{0,300}?~;
 my $PW = "[REDACTED:pw]";
 # env assignments: ZB_PW=..., PASS=..., DB_PASSWD=..., svc_pwd=...
-apply(qr{(?<![A-Za-z0-9\$/])((?:[A-Za-z0-9]+[_.-])*(?-i:PW|PWD|PASS|PASSWD|PASSCODE)(?:[_.-][A-Za-z0-9]+)*=|(?:[A-Za-z0-9]+[_.-])+(?i:pw|pwd|pass|passwd|passcode)=)($SV)}, $PW, sub { prose_ok($_[0], 1) });
+apply(qr{(?<![A-Za-z0-9\$/])((?:[A-Za-z0-9]{1,30}[_.-]){0,6}(?-i:PW|PWD|PASS|PASSWD|PASSCODE)(?:[_.-][A-Za-z0-9]{1,30}){0,4}=|(?:[A-Za-z0-9]{1,30}[_.-]){1,6}(?i:pw|pwd|pass|passwd|passcode)=)($SV)}, $PW, sub { prose_ok($_[0], 1) });
 # --password VALUE, --db-password VALUE, --pass VALUE, --client-secret VALUE, --token VALUE (the = form is above)
 apply(qr{(?<![A-Za-z0-9_-])((?i:--(?:[a-z0-9]+-)*(?:(?:password|passwd|passphrase|secret|token|api-?key|access-?key)(?:-(?!(?:stdin|file|env|prompt|cmd|command|helper|store|path|dir|length|policy)\b)[a-z0-9]+)*|pass|pw|pwd))(?:=|[ \t]+))($SV)}, $PW, sub { shell_ok($_[0], 0) });
 # sshpass -p VALUE (after its own flags only, so "sshpass -e ssh -p 22 host" keeps its port)
@@ -110,7 +111,7 @@ apply(qr{(\bredis-cli\b$GAP[ \t]-a[ \t]+)($SV)}, $PW, sub { shell_ok($_[0], 0) }
 apply(qr{(\bldap(?:search|modify|add|delete|passwd|compare|whoami|modrdn)\b$GAP[ \t]-w[ \t]*)($SV)}, $PW, sub { shell_ok($_[0], 0) });
 apply(qr{(-pass(?:in|out)?[ \t]+pass:)($SV)}, $PW, sub { shell_ok($_[0], 1) });
 # curl -u USER:PASS (the user name stays)
-apply(qr{(\bcurl\b$GAP[ \t](?:-[A-Za-z]*u|--user)(?:[ \t]+|=)?["']?[^\s:'"]+:)([^\s'";&|]+)}, $PW, sub { shell_ok($_[0], 1) });
+apply(qr{(\bcurl\b$GAP[ \t](?:-[A-Za-z]{0,10}u|--user)(?:[ \t]+|=)?["']?[^\s:'"]+:)([^\s'";&|]+)}, $PW, sub { shell_ok($_[0], 1) });
 
 # ---- passwords in prose (ported from jev-evals agentlogs/redact.py; value only)
 my $PHP = "[REDACTED:prose-password]";
@@ -122,7 +123,7 @@ my $PWFOR = '(?:[ \t]+(?:for|of)[ \t]+(?:the[ \t]+)?(?:(?:user|account|login|adm
 my $LOGIN = '\blog(?:ged|ging)?[ \t-]?in[ \t]+(?:as|with|using)[ \t]+(?:user(?:name)?[ \t]+)?' . $USER;
 my @PROSE = (
   [ '(?i)(?<![A-Za-z0-9$])((?:[A-Za-z0-9]+[_\-])*(?:password|passwd|passcode|passphrase)[`\'"]?[ \t]*(?::=|[:=])[ \t]*)' . $VALQ, 1 ],
-  [ '(?i)(?<![A-Za-z0-9$])((?:[A-Za-z0-9]+[_\-])*(?:(?-i:pass|Pass)|pw|pwd)[`\'"]?[ \t]*(?::=|[:=])[ \t]*)' . $VALQ, 0 ],
+  [ '(?i)(?<![A-Za-z0-9$])((?:[A-Za-z0-9]{1,30}[_\-]){0,6}(?:(?-i:pass|Pass)|pw|pwd)[`\'"]?[ \t]*(?::=|[:=])[ \t]*)' . $VALQ, 0 ],
   [ '(?i)\b(' . $PWK . $PWFOR . '[ \t]+(?:is|was|are)\b[ \t]*:?[ \t]*)' . $VAL, 1 ],
   [ '(?i)\b(' . $PWK . $PWFOR . '[ \t]+(?:(?:is|was|has been|will be|should be)[ \t]+)?(?:set|changed|reset|updated|rotated)?[ \t]*(?:to|->|\x{2192})[ \t]+)' . $VAL, 0 ],
   [ '(?i)(' . $LOGIN . '[ \t]*[/:,][ \t]*)' . $VAL, 0 ],
