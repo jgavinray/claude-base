@@ -23,7 +23,8 @@
 #            a NEW file (target missing) is not a trigger, an unresolvable
 #            variable in the target is
 #   remote   ssh HOST COMMAND where COMMAND is not on the read-only list
-#   hyper03  a network or exec command that names 192.168.0.43 / hyper03
+#   hyper03  a network or exec command that names hyper03 (short name, Tailscale
+#            name, or the LAN address from the local file below)
 #            (shared with another engineer), even a read-only one
 #
 # Decision: P = Jev's probability for disturbs_others_work.
@@ -37,8 +38,8 @@
 # Kill switch: create ~/.claude/scope-check-off. Doc: wiki/scope-check.md in
 # ~/exomemory.
 #
-# Settings (environment): SCOPE_CHECK_URL (default $JEV_SHADOW_URL or
-# http://192.168.0.44:8102), SCOPE_CHECK_TIMEOUT seconds (3),
+# Settings (environment): SCOPE_CHECK_URL (default $JEV_SHADOW_URL or the hyper01
+# LAN address from the local file below, else http://hyper01.puma-wyvern.ts.net:8102), SCOPE_CHECK_TIMEOUT seconds (3),
 # SCOPE_CHECK_HIGH (0.50), SCOPE_CHECK_LOW (0.15), SCOPE_CHECK_OFF_FILE,
 # SCOPE_CHECK_LOG (default ~/.claude/scope-check.log), SCOPE_CHECK_OWN_FILE.
 set -u
@@ -49,7 +50,23 @@ OFF="${SCOPE_CHECK_OFF_FILE:-$HOME/.claude/scope-check-off}"
 if [ "$MODE" = hook ] && [ -e "$OFF" ]; then exit 0; fi
 command -v jq >/dev/null 2>&1 && command -v perl >/dev/null 2>&1 || exit 0
 
-URL="${SCOPE_CHECK_URL:-${JEV_SHADOW_URL:-http://192.168.0.44:8102}}"
+# The owner's LAN addresses are not kept in this public repo. A host's LAN
+# address is read at run time from the untracked file named by $CLAUDE_BASE_LOCAL
+# (default ~/.config/fleet-control/local.toml, the same file fleet-control uses):
+#   [hosts.hyper01]
+#   address = "<LAN address>"
+# No file, or no entry: empty, and the caller falls back to the Tailscale name.
+lan_addr() {
+  local f="${CLAUDE_BASE_LOCAL:-$HOME/.config/fleet-control/local.toml}" a
+  [ -r "$f" ] || return 0
+  a=$(awk -v h="$1" '/^[[:space:]]*\[/ { s = $0; gsub(/[[:space:]]/, "", s); on = (s == "[hosts." h "]"); next }
+    on && /^[[:space:]]*address[[:space:]]*=/ { v = $0; sub(/^[^=]*=[[:space:]]*"/, "", v); sub(/".*$/, "", v); print v; exit }' "$f" 2>/dev/null)
+  case "$a" in ''|*[!0-9A-Za-z.:-]*) return 0 ;; esac
+  printf '%s' "$a"
+}
+H01=$(lan_addr hyper01)
+SC_H03_ADDR=$(lan_addr hyper03)
+URL="${SCOPE_CHECK_URL:-${JEV_SHADOW_URL:-http://${H01:-hyper01.puma-wyvern.ts.net}:8102}}"
 TIMEOUT="${SCOPE_CHECK_TIMEOUT:-3}"
 HIGH="${SCOPE_CHECK_HIGH:-0.50}"
 LOW="${SCOPE_CHECK_LOW:-0.15}"
@@ -473,10 +490,13 @@ my $ctx = { cwd => ($CWD0 ne '' ? $CWD0 : undef), vars => { PWD => $CWD0 }, remo
 analyze_script($stripped, $ctx);
 for my $b (@bodies) { my $r = { cwd => undef, vars => {}, remote => 1, containers => {}, ft => [] }; analyze_script($b, $r) }
 
-# hyper03 (192.168.0.43) is shared with another engineer: any network or exec
-# command that names it. Words that only carry text (echo, git commit, grep,
+# hyper03 is shared with another engineer: any network or exec command that
+# names it (short name, Tailscale name, or its LAN address read from the local
+# file at run time). Words that only carry text (echo, git commit, grep,
 # cat) do not count.
 my %TEXTONLY = map { $_ => 1 } qw(echo printf grep egrep fgrep rg ag cat head tail awk jq wc sort uniq diff cmp less more cut tr tee gh mkdir ls find file stat sed);
+my $H03_ADDR = $ENV{SC_H03_ADDR} // '';
+my $H03_RE = ($H03_ADDR =~ /^[0-9]+(?:\.[0-9]+){3}$/) ? qr/(?<![\d.])\Q$H03_ADDR\E(?!\d)|\bhyper03\b/i : qr/\bhyper03\b/i;
 sub hyper03_scan { my ($s, $ctx0) = @_;
   my $cmds = tokenize($s);
   for my $c (@$cmds) {
@@ -486,7 +506,7 @@ sub hyper03_scan { my ($s, $ctx0) = @_;
     next unless @w;
     (my $name = $w[0]{v}) =~ s{.*/}{};
     my $all = join ' ', (map { $_->{v} } @w), (map { $_->[1]{v} } @{$c->{redirs}});
-    next unless $all =~ /(?<![\d.])192\.168\.0\.43(?!\d)|\bhyper03\b/i;
+    next unless $all =~ $H03_RE;
     if ($name eq 'git') { my @g = grep { !/^-/ } map { $_->{v} } @w[1 .. $#w]; next unless ($g[0] // '') =~ /^(push|pull|fetch|clone|remote|ls-remote)$/ }
     elsif ($TEXTONLY{$name}) { next }
     emit(class => 'hyper03', verb => $name, detail => short($all), own => 0, remote => ($name eq 'ssh' ? 1 : 0)); } }
@@ -495,7 +515,7 @@ hyper03_scan($stripped);
 print JSON::PP->new->canonical->encode({ triggers => \@T }), "\n";
 PERL
 
-CLS=$(printf '%s' "$CMD" | SC_CWD="$CWD" SC_TOP="$TOP" SC_SCRATCH="$SCRATCH" SC_OWN="$OWN_EXTRA" perl -e "$PERL_CLASSIFY" 2>/dev/null) || exit 0
+CLS=$(printf '%s' "$CMD" | SC_H03_ADDR="$SC_H03_ADDR" SC_CWD="$CWD" SC_TOP="$TOP" SC_SCRATCH="$SCRATCH" SC_OWN="$OWN_EXTRA" perl -e "$PERL_CLASSIFY" 2>/dev/null) || exit 0
 printf '%s' "$CLS" | jq -e '(.triggers | length) > 0' >/dev/null 2>&1 || exit 0   # nothing in a scope class: allow, no call
 if [ "$MODE" = classify ]; then printf '%s\n' "$CLS"; exit 0; fi
 
@@ -667,7 +687,7 @@ if [ "$MODE" = hook ]; then
   if printf '%s' "$CLS" | jq -e 'any(.triggers[]; .class=="hyper03")' >/dev/null 2>&1 &&
      printf '%s' "$CMD" | grep -qiE '(^|[^[:alnum:]_])(nvidia[-_[:alnum:]]*|cuda|dkms|modprobe|rmmod|insmod|update-initramfs|kexec|reboot|shutdown|poweroff|halt|init +6|systemctl +(reboot|poweroff|halt)|[[:alnum:]_-]*driver[[:alnum:]_-]*)([^[:alnum:]_]|$)'; then
     log_line deny det "hyper03 nvidia/driver/reboot"
-    deny "scope-check: hyper03 (192.168.0.43) is shared with another engineer. NVIDIA, driver and reboot commands aimed at it are blocked. Leave hyper03 alone and say in your final report what you needed, so the owner can decide."
+    deny "scope-check: hyper03 is shared with another engineer. NVIDIA, driver and reboot commands aimed at it are blocked. Leave hyper03 alone and say in your final report what you needed, so the owner can decide."
   fi
 fi
 
@@ -705,7 +725,7 @@ Noticed by the hook: $CLASSES
 ${ctx:+What is known about the targets:
 $ctx
 }
-Background: several Claude Code sessions and background workers run on this Mac and on the owner's fleet at the same time, each with its own repository and scratch. Their processes, files, hold files, containers and services are not this agent's. Matching processes by a name or path pattern (pkill -f, pgrep -f) hits other sessions' shells. Hosts spark, spark2, spark3, spark4 and hyper01 are the owner's fleet; hyper03 (192.168.0.43) is shared with another engineer and must not be restarted, deployed to or used for GPU tests.
+Background: several Claude Code sessions and background workers run on this Mac and on the owner's fleet at the same time, each with its own repository and scratch. Their processes, files, hold files, containers and services are not this agent's. Matching processes by a name or path pattern (pkill -f, pgrep -f) hits other sessions' shells. Hosts spark, spark2, spark3, spark4 and hyper01 are the owner's fleet; hyper03 (hyper03.puma-wyvern.ts.net) is shared with another engineer and must not be restarted, deployed to or used for GPU tests.
 STATE
 }
 

@@ -12,7 +12,8 @@
 # Secrets are masked HERE, on this machine, before anything goes on the wire.
 # Kill switch: create ~/.claude/jev-shadow-off and the guard skips the call.
 #
-# Settings (environment): JEV_SHADOW_URL (default http://192.168.0.44:8102),
+# Settings (environment): JEV_SHADOW_URL (default: the hyper01 LAN address from the
+# local file below, else http://hyper01.puma-wyvern.ts.net:8102),
 # JEV_SHADOW_TIMEOUT seconds (default 8).
 set -u
 
@@ -241,7 +242,22 @@ redact() { perl -e "$REDACT_PL"; }
 if [ "${1:-}" = "redact" ]; then redact; exit 0; fi
 
 command -v curl >/dev/null 2>&1 && command -v jq >/dev/null 2>&1 || exit 0
-URL="${JEV_SHADOW_URL:-http://192.168.0.44:8102}"
+# The owner's LAN addresses are not kept in this public repo. A host's LAN
+# address is read at run time from the untracked file named by $CLAUDE_BASE_LOCAL
+# (default ~/.config/fleet-control/local.toml, the same file fleet-control uses):
+#   [hosts.hyper01]
+#   address = "<LAN address>"
+# No file, or no entry: empty, and the caller falls back to the Tailscale name.
+lan_addr() {
+  local f="${CLAUDE_BASE_LOCAL:-$HOME/.config/fleet-control/local.toml}" a
+  [ -r "$f" ] || return 0
+  a=$(awk -v h="$1" '/^[[:space:]]*\[/ { s = $0; gsub(/[[:space:]]/, "", s); on = (s == "[hosts." h "]"); next }
+    on && /^[[:space:]]*address[[:space:]]*=/ { v = $0; sub(/^[^=]*=[[:space:]]*"/, "", v); sub(/".*$/, "", v); print v; exit }' "$f" 2>/dev/null)
+  case "$a" in ''|*[!0-9A-Za-z.:-]*) return 0 ;; esac
+  printf '%s' "$a"
+}
+H01=$(lan_addr hyper01)
+URL="${JEV_SHADOW_URL:-http://${H01:-hyper01.puma-wyvern.ts.net}:8102}"
 
 # Same question and rubric as jev/testdata/bash_risk_question.json in
 # mission-control, which the service's quality gate (AUC 0.977) was run on.

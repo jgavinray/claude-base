@@ -26,7 +26,8 @@
 # Secrets are masked HERE (jev-shadow.sh redact) before anything leaves the machine.
 # The service masks again and logs every decision (decisions.jsonl on hyper01).
 #
-# Settings (environment): STOP_CHECK_URL (default http://192.168.0.44:8102),
+# Settings (environment): STOP_CHECK_URL (default: the hyper01 LAN address from the
+# local file below, else http://hyper01.puma-wyvern.ts.net:8102),
 # STOP_CHECK_TIMEOUT seconds (4), STOP_CHECK_THRESHOLD (see THRESHOLD below),
 # STOP_CHECK_MAX_BLOCKS (2), STOP_CHECK_OFF_FILE (~/.claude/stop-check-off),
 # STOP_CHECK_STATE_DIR (per-user temp dir), STOP_CHECK_LOG (~/.claude/stop-check.log,
@@ -35,7 +36,22 @@ set -u
 
 THRESHOLD_DEFAULT="0.65"   # chosen on the training split; see eval/stop-check/RESULTS.md
 HOOKDIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-URL="${STOP_CHECK_URL:-http://192.168.0.44:8102}"
+# The owner's LAN addresses are not kept in this public repo. A host's LAN
+# address is read at run time from the untracked file named by $CLAUDE_BASE_LOCAL
+# (default ~/.config/fleet-control/local.toml, the same file fleet-control uses):
+#   [hosts.hyper01]
+#   address = "<LAN address>"
+# No file, or no entry: empty, and the caller falls back to the Tailscale name.
+lan_addr() {
+  local f="${CLAUDE_BASE_LOCAL:-$HOME/.config/fleet-control/local.toml}" a
+  [ -r "$f" ] || return 0
+  a=$(awk -v h="$1" '/^[[:space:]]*\[/ { s = $0; gsub(/[[:space:]]/, "", s); on = (s == "[hosts." h "]"); next }
+    on && /^[[:space:]]*address[[:space:]]*=/ { v = $0; sub(/^[^=]*=[[:space:]]*"/, "", v); sub(/".*$/, "", v); print v; exit }' "$f" 2>/dev/null)
+  case "$a" in ''|*[!0-9A-Za-z.:-]*) return 0 ;; esac
+  printf '%s' "$a"
+}
+H01=$(lan_addr hyper01)
+URL="${STOP_CHECK_URL:-http://${H01:-hyper01.puma-wyvern.ts.net}:8102}"
 TIMEOUT="${STOP_CHECK_TIMEOUT:-4}"
 THRESHOLD="${STOP_CHECK_THRESHOLD:-$THRESHOLD_DEFAULT}"
 MAX_BLOCKS="${STOP_CHECK_MAX_BLOCKS:-2}"

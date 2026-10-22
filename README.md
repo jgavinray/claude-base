@@ -100,8 +100,9 @@ later. Nothing acts on the answer yet.
   travels on stdin, never on a command line.
 - **Kill switch:** `touch ~/.claude/jev-shadow-off` stops it at once (the guard
   checks the file on every command); `rm ~/.claude/jev-shadow-off` turns it back on.
-- Settings: `JEV_SHADOW_URL` (default `http://192.168.0.44:8102`),
-  `JEV_SHADOW_TIMEOUT` seconds (default 8).
+- Settings: `JEV_SHADOW_URL` (default: `http://<hyper01 LAN address>:8102`, the
+  address read from the local file below, else
+  `http://hyper01.puma-wyvern.ts.net:8102`), `JEV_SHADOW_TIMEOUT` seconds (default 8).
 - `install.sh` copies `jev-shadow.sh` with the other hooks.
 
 ## Scope check
@@ -113,13 +114,37 @@ asks "does this touch work the agent did not start?". Since 10/21/2026:
   target is a process this session started (a child of the session, started from
   its scratchpad, or in a pid file in its scratchpad); a name or path pattern is
   expanded with `pgrep` first. NVIDIA, driver and reboot commands aimed at
-  hyper03 (192.168.0.43) deny.
+  hyper03 deny. hyper03 is matched by its short name, its Tailscale name
+  (`hyper03.puma-wyvern.ts.net`) and its LAN address, which is read at run time
+  from the local file (next section).
 - **Logged only:** service control, overwrites outside the workspace, ssh state
   changes and other hyper03 use are sent to Jev in the background
   (`model: jev-scope-check`) and the answer goes to `~/.claude/scope-check.log`.
   Nothing waits for it. `touch ~/.claude/scope-check-jev-enforce` makes it decide.
 - **Kill switch:** `touch ~/.claude/scope-check-off`.
 - Doc: `wiki/scope-check.md` in the memory store.
+
+### Local addresses (not in this repo)
+
+This repo is public, so it holds no IP addresses and no other person's name; hosts
+are Tailscale names (`<host>.puma-wyvern.ts.net`). `jev-shadow.sh`, `scope-check.sh`
+and `stop-check.sh` read a host's LAN address at run time from an untracked file,
+`$CLAUDE_BASE_LOCAL` (default `~/.config/fleet-control/local.toml`, the file
+fleet-control uses; keep it mode 600):
+
+    [hosts.hyper01]
+    address = "<LAN address>"
+
+    [hosts.hyper03]
+    address = "<LAN address>"
+
+hyper01 is where the Jev service runs (default URL: its LAN address on port 8102;
+without the file, `http://hyper01.puma-wyvern.ts.net:8102`). hyper03's address is
+what lets the NVIDIA/driver/reboot deny catch a command written with the address;
+without the file only the short and Tailscale names are caught. `.claude/verify.sh`
+fails if a tracked file holds a private IPv4 address, a Tailscale address
+(100.64/10) or the other engineer's name (192.0.2.x documentation addresses and
+loopback are allowed).
 
 ## Reproducibility
 

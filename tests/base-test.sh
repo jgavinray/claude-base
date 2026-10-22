@@ -257,8 +257,8 @@ rm -rf "$ST" "/private/tmp/claude-base-guardtest-sp-$$"
 printf '# test databases the session made\nmysql-db:acore_auth_test\nmysql-db:acore_world_test  # trailing note\n' > "$FH/.claude/guard-ephemeral"
 hg_is 'mysql -e "DROP DATABASE acore_auth_test"'                          allow "mysqldrop-listed"
 hg_is 'sudo mysql -e "drop database if exists `acore_world_test`;"'        allow "mysqldrop-listed-backticks-ifexists"
-hg_is "ssh jgavinray@192.168.0.44 'sudo mysql -e \"DROP DATABASE acore_auth_test\"'" allow "mysqldrop-listed-over-ssh"
-hg_is "ssh jgavinray@192.168.0.44 'sudo mysql -e \"DROP DATABASE IF EXISTS acore_world_test\"'" allow "mysqldrop-listed-over-ssh-ifexists"
+hg_is "ssh jgavinray@192.0.2.44 'sudo mysql -e \"DROP DATABASE acore_auth_test\"'" allow "mysqldrop-listed-over-ssh"
+hg_is "ssh jgavinray@192.0.2.44 'sudo mysql -e \"DROP DATABASE IF EXISTS acore_world_test\"'" allow "mysqldrop-listed-over-ssh-ifexists"
 hg_is 'mysql -e "DROP DATABASE acore_characters_test"'                    deny  "mysqldrop-unlisted"
 hg_is 'mysql -e "DROP DATABASE acore_auth"'                               deny  "mysqldrop-acore_auth"
 hg_is 'mysql -e "DROP DATABASE acore_world"'                              deny  "mysqldrop-acore_world"
@@ -278,29 +278,29 @@ hg_is 'mysql -e "DROP DATABASE acore_auth_test"'                          allow 
 rm -f "$FH/.claude/guard-ephemeral"
 # 10/21/2026: `host:<ip-or-alias>:<abs path>` lines in guard-ephemeral allow
 # recursive deletes of that path (and below) over ssh, for that host only.
-printf 'host:192.168.0.44:/home/azeroth/ac-build\nhost:hyper01:/home/azeroth/ac-stage/\nhost:192.168.0.44:/home/azeroth\nhost:192.168.0.44:/etc\nhost:192.168.0.44:/\n' > "$FH/.claude/guard-ephemeral"
-hg_is "ssh jgavinray@192.168.0.44 'rm -rf /home/azeroth/ac-build'"        allow "hostrm-listed"
-hg_is "ssh jgavinray@192.168.0.44 'rm -rf /home/azeroth/ac-build/sub/x'"  allow "hostrm-listed-below"
-hg_is "ssh jgavinray@192.168.0.44 'rm -rf /home/azeroth/ac-build/*'"      allow "hostrm-listed-glob-below"
-hg_is "ssh jgavinray@192.168.0.44 sudo rm -rf /home/azeroth/ac-build"     allow "hostrm-listed-sudo"
-hg_is "ssh -o StrictHostKeyChecking=no -i /k -p 22 jgavinray@192.168.0.44 'sudo rm -rf /home/azeroth/ac-build'" allow "hostrm-listed-ssh-options"
+printf 'host:192.0.2.44:/home/azeroth/ac-build\nhost:hyper01:/home/azeroth/ac-stage/\nhost:192.0.2.44:/home/azeroth\nhost:192.0.2.44:/etc\nhost:192.0.2.44:/\n' > "$FH/.claude/guard-ephemeral"
+hg_is "ssh jgavinray@192.0.2.44 'rm -rf /home/azeroth/ac-build'"        allow "hostrm-listed"
+hg_is "ssh jgavinray@192.0.2.44 'rm -rf /home/azeroth/ac-build/sub/x'"  allow "hostrm-listed-below"
+hg_is "ssh jgavinray@192.0.2.44 'rm -rf /home/azeroth/ac-build/*'"      allow "hostrm-listed-glob-below"
+hg_is "ssh jgavinray@192.0.2.44 sudo rm -rf /home/azeroth/ac-build"     allow "hostrm-listed-sudo"
+hg_is "ssh -o StrictHostKeyChecking=no -i /k -p 22 jgavinray@192.0.2.44 'sudo rm -rf /home/azeroth/ac-build'" allow "hostrm-listed-ssh-options"
 hg_is "ssh hyper01 'rm -rf /home/azeroth/ac-stage'"                       allow "hostrm-listed-alias"
-hg_is "ssh 192.168.0.44 'rm -rf /home/azeroth/ac-stage'"                  deny  "hostrm-alias-is-not-its-ip"
+hg_is "ssh 192.0.2.44 'rm -rf /home/azeroth/ac-stage'"                  deny  "hostrm-alias-is-not-its-ip"
 hg_is "ssh hyper01 'rm -rf /home/azeroth/ac-build'"                       deny  "hostrm-ip-line-is-not-the-alias"
-hg_is "ssh jgavinray@192.168.0.43 'rm -rf /home/azeroth/ac-build'"        deny  "hostrm-other-host"
-hg_is "ssh jgavinray@192.168.0.44 'rm -rf /home/azeroth/ac-other'"        deny  "hostrm-unlisted-path"
-hg_is "ssh jgavinray@192.168.0.44 'rm -rf /home/azeroth/ac-build-old'"    deny  "hostrm-prefix-is-whole-component"
-hg_is "ssh jgavinray@192.168.0.44 'rm -rf /home/azeroth/ac-*'"            deny  "hostrm-glob-above-listed"
-hg_is "ssh jgavinray@192.168.0.44 'rm -rf /home/azeroth/ac-build/../ac-other'" deny "hostrm-dotdot-escape"
-hg_is "ssh jgavinray@192.168.0.44 'rm -rf ac-build'"                      deny  "hostrm-relative"
-hg_is "ssh jgavinray@192.168.0.44 'rm -rf /home/azeroth'"                 deny  "hostrm-listed-home-line-ignored"
-hg_is "ssh jgavinray@192.168.0.44 'rm -rf /home/azeroth/other'"           deny  "hostrm-listed-home-line-covers-nothing"
-hg_is "ssh jgavinray@192.168.0.44 'rm -rf /etc/foo'"                      deny  "hostrm-listed-system-line-ignored"
-hg_is "ssh jgavinray@192.168.0.44 'rm -rf /'"                             deny  "hostrm-root"
-hg_is "ssh jgavinray@192.168.0.44 'rm -rf /home/azeroth/ac-build /home/azeroth/ac-other'" deny "hostrm-one-target-unlisted"
-hg_is "ssh jgavinray@192.168.0.44 'rm -rf /home/azeroth/ac-build \$X'"    deny  "hostrm-variable-target"
+hg_is "ssh jgavinray@192.0.2.43 'rm -rf /home/azeroth/ac-build'"        deny  "hostrm-other-host"
+hg_is "ssh jgavinray@192.0.2.44 'rm -rf /home/azeroth/ac-other'"        deny  "hostrm-unlisted-path"
+hg_is "ssh jgavinray@192.0.2.44 'rm -rf /home/azeroth/ac-build-old'"    deny  "hostrm-prefix-is-whole-component"
+hg_is "ssh jgavinray@192.0.2.44 'rm -rf /home/azeroth/ac-*'"            deny  "hostrm-glob-above-listed"
+hg_is "ssh jgavinray@192.0.2.44 'rm -rf /home/azeroth/ac-build/../ac-other'" deny "hostrm-dotdot-escape"
+hg_is "ssh jgavinray@192.0.2.44 'rm -rf ac-build'"                      deny  "hostrm-relative"
+hg_is "ssh jgavinray@192.0.2.44 'rm -rf /home/azeroth'"                 deny  "hostrm-listed-home-line-ignored"
+hg_is "ssh jgavinray@192.0.2.44 'rm -rf /home/azeroth/other'"           deny  "hostrm-listed-home-line-covers-nothing"
+hg_is "ssh jgavinray@192.0.2.44 'rm -rf /etc/foo'"                      deny  "hostrm-listed-system-line-ignored"
+hg_is "ssh jgavinray@192.0.2.44 'rm -rf /'"                             deny  "hostrm-root"
+hg_is "ssh jgavinray@192.0.2.44 'rm -rf /home/azeroth/ac-build /home/azeroth/ac-other'" deny "hostrm-one-target-unlisted"
+hg_is "ssh jgavinray@192.0.2.44 'rm -rf /home/azeroth/ac-build \$X'"    deny  "hostrm-variable-target"
 rm -f "$FH/.claude/guard-ephemeral"
-hg_is "ssh jgavinray@192.168.0.44 'rm -rf /home/azeroth/ac-build'"        deny  "hostrm-no-list-file"
+hg_is "ssh jgavinray@192.0.2.44 'rm -rf /home/azeroth/ac-build'"        deny  "hostrm-no-list-file"
 # 10/21/2026: a regenerable NAME (dist, venv, build, ...) is not enough. Locally
 # nothing may be running in it and it may hold no *.conf or etc/; over ssh the
 # name alone allows nothing (a live AzerothCore env/dist was one rm away).
@@ -316,13 +316,13 @@ guard_is "rm -rf $FX/plainbuild/build"           allow "regen-plain-build-dir"
 guard_is "cd $FX/plainbuild && rm -rf build"     allow "regen-plain-build-dir-relative"
 kill "$LIVE1" "$LIVE2" 2>/dev/null; wait "$LIVE1" "$LIVE2" 2>/dev/null
 guard_is "rm -rf $FX/live/dist"                  allow "regen-dist-after-process-exits"
-guard_is "ssh jgavinray@192.168.0.44 'rm -rf /home/azeroth/azerothcore-wotlk/env/dist'" deny "regen-remote-env-dist"
+guard_is "ssh jgavinray@192.0.2.44 'rm -rf /home/azeroth/azerothcore-wotlk/env/dist'" deny "regen-remote-env-dist"
 guard_is "ssh hyper01 'rm -rf node_modules'"     deny  "regen-remote-relative-node_modules"
 guard_is "ssh hyper01 'rm -rf /tmp/proj/build'"  allow "regen-remote-tmp-build"
-printf 'host:192.168.0.44:/home/azeroth/azerothcore-wotlk/env/dist\n' > "$FH/.claude/guard-ephemeral"
-hg_is "ssh jgavinray@192.168.0.44 'rm -rf /home/azeroth/azerothcore-wotlk/env/dist'" allow "regen-remote-env-dist-listed"
-hg_is "ssh jgavinray@192.168.0.44 'sudo rm -rf /home/azeroth/azerothcore-wotlk/env/dist/etc'" allow "regen-remote-env-dist-listed-below"
-hg_is "ssh jgavinray@192.168.0.43 'rm -rf /home/azeroth/azerothcore-wotlk/env/dist'" deny "regen-remote-listed-other-host"
+printf 'host:192.0.2.44:/home/azeroth/azerothcore-wotlk/env/dist\n' > "$FH/.claude/guard-ephemeral"
+hg_is "ssh jgavinray@192.0.2.44 'rm -rf /home/azeroth/azerothcore-wotlk/env/dist'" allow "regen-remote-env-dist-listed"
+hg_is "ssh jgavinray@192.0.2.44 'sudo rm -rf /home/azeroth/azerothcore-wotlk/env/dist/etc'" allow "regen-remote-env-dist-listed-below"
+hg_is "ssh jgavinray@192.0.2.43 'rm -rf /home/azeroth/azerothcore-wotlk/env/dist'" deny "regen-remote-listed-other-host"
 rm -f "$FH/.claude/guard-ephemeral"
 guard_is 'rm -f server.log'                      allow "rm-nonrecursive-with-r-in-name"
 guard_is 'rm -f config.json'                     allow "rm-single-file"
@@ -365,7 +365,11 @@ for _ in $(seq 1 50); do [ -s "$SPORTF" ] && break; sleep 0.1; done
 SURL="http://127.0.0.1:$(cat "$SPORTF" 2>/dev/null)"
 
 # sc CMD [CWD] [SESSION_ID]: run scope-check in hook mode; prints deny|allow
-sc_env() { SCOPE_CHECK_SESSION_PID=$$ SCOPE_CHECK_OFF_FILE="$SCT/no-off" SCOPE_CHECK_LOG="$SLOG" SCOPE_CHECK_URL="${SC_URL:-$SURL}" \
+# The hooks read LAN addresses from the owner's untracked local file; the suite
+# points them at a fixture that holds only 192.0.2.x documentation addresses, so
+# a run never depends on (or reveals) the real file.
+printf '[hosts.hyper01]\naddress = "192.0.2.44"\n\n[hosts.hyper03]\naddress = "192.0.2.43"\n' > "$SCT/local.toml"
+sc_env() { CLAUDE_BASE_LOCAL="${SC_LOCAL:-$SCT/local.toml}" SCOPE_CHECK_SESSION_PID=$$ SCOPE_CHECK_OFF_FILE="$SCT/no-off" SCOPE_CHECK_LOG="$SLOG" SCOPE_CHECK_URL="${SC_URL:-$SURL}" \
   SCOPE_CHECK_JEV_ENFORCE_FILE="${SC_ENF:-$SCT/no-enforce}" SCOPE_CHECK_OWN_FILE="$SCT/no-own" SCOPE_CHECK_TIMEOUT=2 SCOPE_CHECK_SHADOW_TIMEOUT=3 "$@"; }
 sc_out() { jq -n --arg c "$1" --arg w "${2:-$SFX/work}" --arg s "${3:-}" '{tool_input:{command:$c}, cwd:$w, session_id:$s}' | sc_env "$SC" ${SC_MODE:-hook}; }
 sc_is() { # cmd, expected, label, [cwd], [session]
@@ -418,12 +422,26 @@ T "scope:judge-request-names-the-file" bash -c "head -1 '$SBODY' | jq -e '.state
 waitfor "$SLOG" && sleep 0.3
 T "scope:log-only-decision-logged" bash -c "tail -1 '$SLOG' | jq -e '.decision == \"would-allow\" and .source == \"jev-log-only\"'"
 # hyper03
-sc_is "ssh jgavinray@192.168.0.43 nvidia-smi"    deny  "hyper03-nvidia-smi"
-sc_is "ssh 192.168.0.43 'sudo apt install nvidia-driver-550'" deny "hyper03-driver-install"
-sc_is "ssh 192.168.0.43 'sudo modprobe -r nvidia'" deny "hyper03-modprobe"
-sc_is "ssh 192.168.0.43 'sudo systemctl restart foo'" allow "hyper03-restart-is-logged-not-enforced"
-sc_is "curl -s http://192.168.0.43:8081/health"  allow "hyper03-health-is-logged-not-enforced"
-sc_is "git commit -m 'note: nvidia driver on 192.168.0.43'" allow "hyper03-in-a-commit-message"
+sc_is "ssh jgavinray@192.0.2.43 nvidia-smi"    deny  "hyper03-nvidia-smi"
+sc_is "ssh 192.0.2.43 'sudo apt install nvidia-driver-550'" deny "hyper03-driver-install"
+sc_is "ssh 192.0.2.43 'sudo modprobe -r nvidia'" deny "hyper03-modprobe"
+sc_is "ssh 192.0.2.43 'sudo systemctl restart foo'" allow "hyper03-restart-is-logged-not-enforced"
+sc_is "curl -s http://192.0.2.43:8081/health"  allow "hyper03-health-is-logged-not-enforced"
+sc_is "git commit -m 'note: nvidia driver on 192.0.2.43'" allow "hyper03-in-a-commit-message"
+sc_is "ssh hyper03 sudo reboot"                  deny  "hyper03-reboot-by-short-name"
+sc_is "ssh jgavinray@192.0.2.43 sudo reboot"     deny  "hyper03-reboot-by-lan-address"
+sc_is "ssh hyper03.puma-wyvern.ts.net sudo reboot" deny "hyper03-reboot-by-tailscale-name"
+sc_is "ssh hyper03.puma-wyvern.ts.net nvidia-smi" deny "hyper03-nvidia-by-tailscale-name"
+sc_is "ssh 192.0.2.44 sudo reboot"               allow "other-host-reboot-is-not-hyper03"
+sc_is "ssh 192.0.2.430 sudo reboot"              allow "hyper03-address-is-whole-address"
+# no local file: the address cannot be known, the names still deny
+SC_LOCAL="$SCT/absent.toml" sc_is "ssh hyper03 sudo reboot"                 deny  "hyper03-reboot-short-name-without-local-file"
+SC_LOCAL="$SCT/absent.toml" sc_is "ssh hyper03.puma-wyvern.ts.net sudo reboot" deny "hyper03-reboot-fqdn-without-local-file"
+SC_LOCAL="$SCT/absent.toml" sc_is "ssh 192.0.2.43 sudo reboot"              allow "hyper03-address-unknown-without-local-file"
+# a different address in the file is the one that counts
+printf '[hosts.hyper01]\naddress = "192.0.2.43"\n[hosts.hyper03]\naddress = "192.0.2.77"\n' > "$SCT/other.toml"
+SC_LOCAL="$SCT/other.toml" sc_is "ssh 192.0.2.77 sudo reboot"               deny  "hyper03-address-comes-from-the-file"
+SC_LOCAL="$SCT/other.toml" sc_is "ssh 192.0.2.43 sudo reboot"               allow "hyper03-address-not-taken-from-another-section"
 # read-only and own-workspace commands never reach the judge (let the earlier
 # background log-only calls land first)
 sleep 1.5; rm -f "$SBODY"
@@ -454,7 +472,7 @@ classify_has "ssh hyper01 'systemctl restart x'" service "ssh-systemctl"
 classify_has "ssh hyper01 'cd /srv/app && git pull'" remote "ssh-git-pull"
 classify_has "ssh hyper01 'echo x > /etc/motd'"  file    "ssh-write-outside-tmp"
 classify_has "ssh hyper01 'kill 4242'"           signal  "ssh-kill"
-classify_has "curl http://192.168.0.43:8081/v1/models" hyper03 "hyper03-curl"
+classify_has "curl http://192.0.2.43:8081/v1/models" hyper03 "hyper03-curl"
 # Enforcing mode (only with the flag file): the judge decides
 touch "$SENF"; export SC_ENF="$SENF"
 echo 0.90 > "$SPROB"; sc_is "cp a.txt $SFX/shared/hold"   deny  "enforce-high-disturbs"
@@ -1064,6 +1082,44 @@ rm -rf "$TO"
 T "verify:no-silent-truncation" bash -c "! grep -v '^[[:space:]]*#' '$HERE/verify/verify.sh' | grep -q 'head -500'"
 T "verify:kubeconform-sorted" bash -c "grep -q 'sort' '$HERE/verify/verify.sh'"
 T "verify:locale-pinned" grep -q 'export LC_ALL=C' "$HERE/verify/verify.sh"
+
+# ---- public repo: no addresses or names in it; the hooks read them from the local file
+# The leak gate must fail on a planted leak and pass on the allowed forms. The
+# planted values are built here from pieces so this file does not hold them.
+LK="$TMP/leak-test-$$"; rm -rf "$LK"; mkdir -p "$LK"
+leak_run() { rm -rf "$LK/t"; mkdir -p "$LK/t/hooks"; echo "clean" > "$LK/t/README.md"; printf '%s\n' "$1" > "$LK/t/hooks/x.sh"; python3 "$HERE/tests/leak_check.py" "$LK/t"; }
+T  "leak:clean-tree-passes"             leak_run "x=1"
+T  "leak:documentation-address-passes"  leak_run "ssh 192.0.2.44 and 127.0.0.1 and hyper01.puma-wyvern.ts.net"
+T  "leak:public-lookalikes-pass"        leak_run "1.10.0.5 100.63.1.1 172.32.0.1 192.169.0.1"
+TN "leak:192.168-fails"                 leak_run "ssh $(printf '192.168.%s' 7.9)"
+TN "leak:10/8-fails"                    leak_run "ssh $(printf '10.%s' 1.2.3)"
+TN "leak:172.16/12-fails"               leak_run "ssh $(printf '172.20.%s' 3.4)"
+TN "leak:tailscale-100.64/10-fails"     leak_run "ssh $(printf '100.101.%s' 102.103)"
+TN "leak:other-engineer-name-fails"     leak_run "ask $(printf 'zu%s' rih)"
+TN "leak:name-any-case-fails"           leak_run "ask $(printf 'Zu%s' Rih)"
+T  "leak:repo-is-clean"                 python3 "$HERE/tests/leak_check.py" "$HERE"
+rm -rf "$LK"
+
+# Default Jev URL: no env, no real file. With the fixture file the hyper01 LAN
+# address is used; without it the Tailscale name. A stub curl records the URL.
+DU="$TMP/defurl-test-$$"; rm -rf "$DU"; mkdir -p "$DU/bin"
+printf '#!/bin/sh\nprintf "%%s\\n" "$@" > "%s/curl-args"\ncat >/dev/null\n' "$DU" > "$DU/bin/curl"; chmod +x "$DU/bin/curl"
+printf '[hosts.hyper01]\naddress = "192.0.2.44"\n' > "$DU/local.toml"
+default_url() { # hook-name, local-file, input -> first URL-looking argument curl got
+  rm -f "$DU/curl-args"
+  case "$1" in
+    jev)  printf 'ls' | env -u JEV_SHADOW_URL PATH="$DU/bin:$PATH" CLAUDE_BASE_LOCAL="$2" "$HERE/hooks/jev-shadow.sh" >/dev/null 2>&1 ;;
+    stop) stop_event "$HAND" "du-$$-$RANDOM" | env -u STOP_CHECK_URL PATH="$DU/bin:$PATH" CLAUDE_BASE_LOCAL="$2" STOP_CHECK_OFF_FILE="$DU/off" STOP_CHECK_STATE_DIR="$DU/state" STOP_CHECK_LOG="$DU/log" "$HERE/hooks/stop-check.sh" >/dev/null 2>&1 ;;
+  esac
+  grep -o 'http://[^ ]*' "$DU/curl-args" 2>/dev/null | head -1
+}
+for h in jev stop; do
+  u=$(default_url $h "$DU/local.toml")
+  case "$u" in http://192.0.2.44:8102/*) ok "defaulturl:$h:lan-address-from-local-file" ;; *) bad "defaulturl:$h:lan-address-from-local-file" "got '$u'" ;; esac
+  u=$(default_url $h "$DU/absent.toml")
+  case "$u" in http://hyper01.puma-wyvern.ts.net:8102/*) ok "defaulturl:$h:tailscale-name-without-local-file" ;; *) bad "defaulturl:$h:tailscale-name-without-local-file" "got '$u'" ;; esac
+done
+rm -rf "$DU"
 
 # ---- uninstall is exact and reversible --------------------------------------
 T "uninstall:executable" test -x "$HERE/uninstall.sh"
