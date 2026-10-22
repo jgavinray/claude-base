@@ -762,6 +762,138 @@ rm -f "$OFFF"
 kill "$JSTUB" 2>/dev/null; wait "$JSTUB" 2>/dev/null
 rm -rf "$JT"
 
+# ---- stop-check (Stop / SubagentStop: "stop or continue?" decided by Jev) -----
+# A stub service answers with a probability read from a file, so every path of the
+# hook runs for real: block, allow, service down / slow / erroring, loop cap, kill
+# switch, background tasks, masking, and the transcript fallback.
+SC="$HERE/hooks/stop-check.sh"
+ST=$(mktemp -d); SPORT="$ST/port"; SBODY="$ST/body"; SP="$ST/p"; SMODE="$ST/mode"
+echo 0.95 > "$SP"; echo ok > "$SMODE"; : > "$SBODY"
+python3 - "$SPORT" "$SBODY" "$SP" "$SMODE" <<'PYEOF' &
+import http.server, json, sys, time
+portfile, bodyfile, pfile, modefile = sys.argv[1:5]
+class H(http.server.BaseHTTPRequestHandler):
+    def log_message(self, *a): pass
+    def do_POST(self):
+        n = int(self.headers.get("content-length") or 0)
+        data = self.rfile.read(n)
+        with open(bodyfile, "ab") as f: f.write(data + b"\n")
+        mode = open(modefile).read().strip()
+        p = float(open(pfile).read().strip())
+        if mode == "slow": time.sleep(10)
+        if mode == "err500":
+            self.send_response(500); self.send_header("content-length", "0"); self.end_headers(); return
+        body = b"not json at all" if mode == "garbage" else json.dumps({"answers": {"stop": {"type": "choice", "choice": "x",
+            "probabilities": {"done": (1 - p) / 4, "answered": (1 - p) / 4, "waiting_on_background": (1 - p) / 4, "owner_only": (1 - p) / 4, "handing_back": p}}}}).encode()
+        try:
+            self.send_response(200); self.send_header("content-length", str(len(body))); self.end_headers(); self.wfile.write(body)
+        except OSError: pass
+s = http.server.ThreadingHTTPServer(("127.0.0.1", 0), H)
+open(portfile, "w").write(str(s.server_address[1]))
+s.serve_forever()
+PYEOF
+SSTUB=$!
+for _ in $(seq 50); do [ -s "$SPORT" ] && break; sleep 0.1; done
+SURL="http://127.0.0.1:$(cat "$SPORT")"
+export STOP_CHECK_URL="$SURL" STOP_CHECK_OFF_FILE="$ST/off" STOP_CHECK_STATE_DIR="$ST/state" STOP_CHECK_LOG="$ST/log" STOP_CHECK_TIMEOUT=4
+unset STOP_CHECK_THRESHOLD STOP_CHECK_MAX_BLOCKS STOP_CHECK_QUESTION_FILE
+# stop_event TEXT [SESSION] [extra jq object]: the JSON Claude Code sends on stdin
+stop_event() { jq -nc --arg t "$1" --arg s "${2:-s1}" --argjson x "${3:-{\}}" '{hook_event_name:"Stop", session_id:$s, stop_hook_active:false, background_tasks:[], last_assistant_message:$t} + $x'; }
+sc() { stop_event "$@" | "$SC"; }              # prints the hook's stdout
+dec() { local o; o=$(cat); if [ -z "$o" ]; then echo allow; else printf '%s' "$o" | jq -r '.decision // "bad"' 2>/dev/null || echo bad; fi; }   # hook stdout -> block|allow
+sc_decision() { sc "$@" | dec; }
+setp() { echo "$1" > "$SP"; }; setmode() { echo "$1" > "$SMODE"; }
+HAND="I changed the config. Want me to run the tests now? Say go and I will."
+
+# 1. block: valid JSON with decision and reason, the reason says what to do
+setp 0.95; : > "$SBODY"
+out=$(sc "$HAND" blk)
+T  "stop-check:block-is-valid-json" bash -c "printf '%s' '$(printf '%s' "$out" | sed "s/'/'\\\\''/g")' | jq -e '(keys|sort) == [\"decision\",\"reason\"] and .decision == \"block\" and (.reason|type) == \"string\"'"
+T  "stop-check:block-reason-says-what-to-do" bash -c "printf '%s' \"\$1\" | jq -e '.reason | contains(\"handback\") and contains(\"95%\") and contains(\"owner-only\") and contains(\"continue\")'" _ "$out"
+# 2. allow: nothing on stdout, exit 0
+setp 0.05
+o=$(stop_event "All done: 43 tests pass, pushed to origin." low | "$SC"); rc=$?
+if [ -z "$o" ] && [ "$rc" -eq 0 ]; then ok "stop-check:allow-is-silent"; else bad "stop-check:allow-is-silent" "rc=$rc out=$o"; fi
+# threshold is inclusive
+setp 0.50; d=$(STOP_CHECK_THRESHOLD=0.50 sc_decision "$HAND" thr1); [ "$d" = block ] && ok "stop-check:threshold-inclusive" || bad "stop-check:threshold-inclusive" "got $d"
+setp 0.49; d=$(STOP_CHECK_THRESHOLD=0.50 sc_decision "$HAND" thr2); [ "$d" = allow ] && ok "stop-check:below-threshold-allows" || bad "stop-check:below-threshold-allows" "got $d"
+setp 0.95
+
+# 3. the request: right model, the five classes, masked text only
+: > "$SBODY"; SECRET1="ghp_$(printf 'Q%.0s' $(seq 36))"; SECRET2="fake-value-xyz"
+sc "Deploy key is $SECRET1 and ZB_PW=$SECRET2 ./run.sh. Want me to continue?" mask >/dev/null
+T  "stop-check:request-model-and-classes" bash -c "head -1 '$SBODY' | jq -e '.model == \"jev-stop-check\" and (.questions.stop.type == \"choice\") and ((.questions.stop.criteria|keys|sort) == [\"answered\",\"done\",\"handing_back\",\"owner_only\",\"waiting_on_background\"])'"
+TN "stop-check:raw-token-never-sent"    grep -q "QQQQQQQQQQ" "$SBODY"
+TN "stop-check:raw-password-never-sent" grep -q "$SECRET2" "$SBODY"
+T  "stop-check:mask-marker-sent"        grep -q "REDACTED" "$SBODY"
+T  "stop-check:sends-agent-message"     grep -q "Want me to continue" "$SBODY"
+
+# 4. fail open: service down, black-holed, slow, error, garbage -> allow, inside the time limit
+timed_allow() { # label, url, mode
+  local t0 t1 d el
+  t0=$(python3 -c 'import time;print(time.time())')
+  d=$(STOP_CHECK_URL="$2" STOP_CHECK_TIMEOUT=2 sc_decision "$HAND" "fo-$1")
+  t1=$(python3 -c 'import time;print(time.time())')
+  el=$(python3 -c "print(round($t1 - $t0, 2))")
+  if [ "$d" = allow ] && python3 -c "import sys; sys.exit(0 if $el < 4.0 else 1)"; then ok "stop-check:fail-open:$1 (${el}s)"; else bad "stop-check:fail-open:$1" "decision=$d after ${el}s"; fi
+}
+timed_allow refused    "http://127.0.0.1:1"
+timed_allow blackhole  "http://192.0.2.1:9"
+setmode slow;    timed_allow slow    "$SURL"
+setmode err500;  timed_allow http500 "$SURL"
+setmode garbage; timed_allow garbage "$SURL"
+setmode ok
+
+# 5. loop cap: two blocks in a row, then the third stop is allowed, then it starts over
+d1=$(sc_decision "$HAND" cap); d2=$(sc_decision "$HAND" cap); d3=$(sc_decision "$HAND" cap); d4=$(sc_decision "$HAND" cap); d5=$(sc_decision "$HAND" cap); d6=$(sc_decision "$HAND" cap)
+[ "$d1 $d2 $d3 $d4 $d5 $d6" = "block block allow block block allow" ] && ok "stop-check:loop-cap-2" || bad "stop-check:loop-cap-2" "got $d1 $d2 $d3 $d4 $d5 $d6"
+# an allowed stop in between resets the counter
+setp 0.95; a=$(sc_decision "$HAND" rst); setp 0.05; b=$(sc_decision "done" rst); setp 0.95; c=$(sc_decision "$HAND" rst); e=$(sc_decision "$HAND" rst); f=$(sc_decision "$HAND" rst)
+[ "$a $b $c $e $f" = "block allow block block allow" ] && ok "stop-check:allowed-stop-resets-counter" || bad "stop-check:allowed-stop-resets-counter" "got $a $b $c $e $f"
+# sessions and subagents count separately
+a=$(sc_decision "$HAND" sessA); b=$(sc_decision "$HAND" sessA); c=$(sc_decision "$HAND" sessB)
+d=$(stop_event "$HAND" sessA '{"hook_event_name":"SubagentStop","agent_id":"ag1"}' | "$SC" | dec)
+[ "$a $b $c $d" = "block block block block" ] && ok "stop-check:counter-per-session-and-agent" || bad "stop-check:counter-per-session-and-agent" "got $a $b $c $d"
+# the cap is configurable
+setp 0.95; a=$(STOP_CHECK_MAX_BLOCKS=1 sc_decision "$HAND" max1); b=$(STOP_CHECK_MAX_BLOCKS=1 sc_decision "$HAND" max1)
+[ "$a $b" = "block allow" ] && ok "stop-check:max-blocks-setting" || bad "stop-check:max-blocks-setting" "got $a $b"
+
+# 6. kill switch: the file makes it allow without asking the service
+: > "$SBODY"; touch "$ST/off"
+d=$(sc_decision "$HAND" kill)
+rm -f "$ST/off"
+if [ "$d" = allow ] && [ ! -s "$SBODY" ]; then ok "stop-check:kill-switch"; else bad "stop-check:kill-switch" "decision=$d, request sent: $([ -s "$SBODY" ] && echo yes || echo no)"; fi
+d=$(sc_decision "$HAND" kill2); [ "$d" = block ] && ok "stop-check:kill-switch-removed-resumes" || bad "stop-check:kill-switch-removed-resumes" "got $d"
+
+# 7. background tasks still running: allowed, no question asked
+: > "$SBODY"
+d=$(stop_event "$HAND" bg '{"background_tasks":[{"id":"b1","type":"shell","status":"running","command":"sleep 20"}]}' | "$SC" | dec)
+if [ "$d" = allow ] && [ ! -s "$SBODY" ]; then ok "stop-check:background-tasks-allow"; else bad "stop-check:background-tasks-allow" "decision=$d"; fi
+
+# 8. no text, bad input: allow
+d=$(sc_decision "" empty); [ "$d" = allow ] && ok "stop-check:empty-message-allows" || bad "stop-check:empty-message-allows" "got $d"
+o=$(printf 'this is not json' | "$SC"); [ -z "$o" ] && ok "stop-check:bad-input-allows" || bad "stop-check:bad-input-allows" "got $o"
+
+# 9. Stop with no last_assistant_message: read the transcript (last assistant text, last owner message)
+TR="$ST/transcript.jsonl"
+{ printf '%s\n' '{"type":"user","message":{"role":"user","content":"please set up the build"}}'
+  printf '%s\n' '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"Set up. Shall I also add CI?"}]}}'
+  printf '%s\n' '{"type":"user","message":{"role":"user","content":[{"type":"tool_result","content":"x"}]}}'
+  printf '%s\n' '{"type":"assistant","message":{"role":"assistant","content":[{"type":"text","text":"TRANSCRIPT-FALLBACK-TEXT shall I go ahead?"}]}}'; } > "$TR"
+: > "$SBODY"
+d=$(jq -nc --arg p "$TR" '{hook_event_name:"Stop", session_id:"tr1", transcript_path:$p, stop_hook_active:false}' | "$SC" | dec)
+if [ "$d" = block ] && grep -q "TRANSCRIPT-FALLBACK-TEXT" "$SBODY" && grep -q "please set up the build" "$SBODY"; then ok "stop-check:transcript-fallback"; else bad "stop-check:transcript-fallback" "decision=$d"; fi
+
+# 10. the question the hook sends is the one the eval chose
+T "stop-check:question-matches-selected" bash -c "[ \"\$(\"$SC\" question | jq -S -c .)\" = \"\$(jq -S -c '. + {type:\"choice\"}' '$HERE/eval/stop-check/questions/selected.json')\" ]"
+# 11. the settings mirror wires both events to the installed hook
+T "stop-check:settings-wires-Stop"         bash -c "jq -e '.hooks.Stop[0].hooks[0].command == \"\$HOME/.claude/hooks/stop-check.sh\"' '$HERE/settings.json'"
+T "stop-check:settings-wires-SubagentStop" bash -c "jq -e '.hooks.SubagentStop[0].hooks[0].command == \"\$HOME/.claude/hooks/stop-check.sh\"' '$HERE/settings.json'"
+
+kill "$SSTUB" 2>/dev/null; wait "$SSTUB" 2>/dev/null
+unset STOP_CHECK_URL STOP_CHECK_OFF_FILE STOP_CHECK_STATE_DIR STOP_CHECK_LOG STOP_CHECK_TIMEOUT
+rm -rf "$ST"
+
 # ---- post-edit-check ---------------------------------------------------------
 P="$HERE/hooks/post-edit-check.sh"
 W=$(mktemp -d); SID="basetest-$$"
@@ -851,7 +983,13 @@ T "sessctx:reports-absent" has "$(sc "$R8")" "GATE ABSENT"
 SCD=$(mktemp -d); cp "$SC" "$SCD/session-context.sh"; chmod +x "$SCD/session-context.sh"
 LONE=$(printf '{"cwd":"%s"}' "$R8" | "$SCD/session-context.sh" 2>/dev/null)
 T "sessctx:warns-missing-hook" has "$LONE" "silently ABSENT"
+T "sessctx:warns-names-stop-check" has "$LONE" "hook stop-check.sh missing"
+TN "sessctx:no-retired-stop-gate-warning" has "$LONE" "stop-gate.sh"
 rm -rf "$SCD"
+# the real hooks dir is complete, so a session start prints no ABSENT warning
+FULL=$(sc "$R8")
+TN "sessctx:no-warning-when-hooks-present" has "$FULL" "silently ABSENT"
+T  "sessctx:full-dir-still-prints-context" has "$FULL" "GATE ABSENT"
 
 # ---- install.sh dry-run is inert --------------------------------------------
 T "install:dry-run-clean" bash -c "'$HERE/install.sh' --dry-run | grep -q 'would:'"

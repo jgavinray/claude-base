@@ -63,7 +63,7 @@ if [ -f "$SETTINGS" ]; then
           (.hooks // {})
           | with_entries(
               .value |= map(
-                .hooks |= map(select((.command // "") | test("claude-base|\\.claude/hooks/(session-context|pretool-guard|post-edit-check|stop-gate)\\.sh") | not))
+                .hooks |= map(select((.command // "") | test("claude-base|\\.claude/hooks/(session-context|pretool-guard|post-edit-check|stop-gate|stop-check)\\.sh") | not))
               )
               | .value |= map(select((.hooks | length) > 0))
             )

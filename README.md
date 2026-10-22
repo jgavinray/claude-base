@@ -35,10 +35,11 @@ hooks/
   jev-shadow.sh      secret masking plus the background shadow call to the Jev service
   scope-check.sh     called by the guard: signals to processes the session did not start, hyper03, and a log-only Jev check
   post-edit-check.sh PostToolUse(Edit|Write): instant syntax check
+  stop-check.sh      Stop/SubagentStop: asks Jev whether the agent is handing back work it could finish; blocks at 0.65, fails open at 4 s, 2 blocks max in a row; off switch ~/.claude/stop-check-off (eval: eval/stop-check/)
 verify/verify.sh     the auto-detecting verifier -> <repo>/.claude/verify.sh
 agents/              qa-tester, verifier, code-reviewer, doc-manager
 templates/           project CLAUDE.md skeleton
-tests/base-test.sh   206 checks; claude-base gates itself with its own contract
+tests/base-test.sh   561 checks; claude-base gates itself with its own contract
 install.sh           install the global layer
 uninstall.sh         remove exactly what install.sh added
 init-repo.sh         arm one repository (baselines what already fails)
@@ -227,7 +228,7 @@ because then it is the only thing in the path.
 ## Self-test
 
 ```bash
-./.claude/verify.sh     # 136 checks
+./.claude/verify.sh     # 561 checks
 ```
 
 Covers hook behavior (deny/ask/allow, block/pass/cap, edit-triggering, marker

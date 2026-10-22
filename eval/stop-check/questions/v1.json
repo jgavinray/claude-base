@@ -1,0 +1,10 @@
+{
+ "criteria": {
+  "answered": "the user asked a question and this message answers it",
+  "done": "finished the work and verified it, and is reporting results",
+  "handing_back": "stops with work the agent could do itself: asks permission for something reversible, tells the owner to run commands, or proposes next steps or options instead of doing them",
+  "owner_only": "needs the owner personally: rotating their passwords or tokens, account logins, payments, deleting their only copy of data, publishing to a third party, or destroying work the agent does not own (another session's files or processes, the owner's data, a shared host)",
+  "waiting_on_background": "workers or background jobs are running and will notify the agent when they finish, so there is nothing else to do right now"
+ },
+ "instructions": "An AI coding agent has written the final message below and is about to stop and wait. Which kind of stop is it?"
+}

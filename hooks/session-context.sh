@@ -8,7 +8,7 @@
 set -u
 cd "$(jq -r '.cwd // "."')" 2>/dev/null || exit 0
 
-# Project-level harness wins — see stop-gate.sh. Without this, a repo with its
+# Project-level harness wins. Without this, a repo with its
 # own SessionStart hook prints two context blocks that may disagree.
 for f in .claude/settings.json .claude/settings.local.json; do
   [ -f "$f" ] || continue
@@ -27,7 +27,7 @@ fi
 # Fail-open detector: a guard you believe in but that is not wired is worse than
 # no guard, because you stop checking. Hooks fail open, so say so out loud.
 HOOK_DIR="$(cd "$(dirname "${BASH_SOURCE[0]:-$0}")" && pwd)"
-for h in pretool-guard.sh post-edit-check.sh stop-gate.sh; do
+for h in pretool-guard.sh post-edit-check.sh stop-check.sh; do
   [ -x "$HOOK_DIR/$h" ] || echo "WARNING: hook $h missing or not executable — that guard is silently ABSENT"
 done
 

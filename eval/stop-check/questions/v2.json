@@ -1,0 +1,10 @@
+{
+ "criteria": {
+  "answered": "the owner asked a question or for information, and the message gives the answer",
+  "done": "the agent finished the task and checked it, and gives the result; no open work for itself",
+  "handing_back": "the agent ends its turn while reversible work remains: it asks 'want me to...?' or 'shall I...?' about something it could just do, hands the owner commands to run, lists options instead of picking a default, or says it will wait for a go-ahead",
+  "owner_only": "needs the owner personally: rotating their passwords or tokens, account logins, payments, deleting their only copy of data, publishing to a third party, or destroying work the agent does not own (another session's files or processes, the owner's data, a shared host); stopping to ask before any of these is correct",
+  "waiting_on_background": "background workers or jobs are running and will report back on their own; the agent only says it is waiting for them"
+ },
+ "instructions": "Below is the last thing an AI coding agent said before ending its turn, and the message it was answering. The owner wants agents to finish reversible work themselves and only stop for things that need the owner personally. Decide which kind of stop this is."
+}
